@@ -448,74 +448,33 @@ func (b *Ble) writeMessage(msg *message.Message) {
 }
 
 func (b *Ble) readMessageData(data Packet) (*message.Message, error) {
-	var buf bytes.Buffer
-	var checksum []byte
-
-	// fragments := int(data[1])
-	checksum = data[2:6]
-	len := data[6]
-	end := len + 7
-	buf.Write(data[7:end])
-
-	bytes := buf.Bytes()
-	sum := crc32.ChecksumIEEE(bytes)
-	if binary.BigEndian.Uint32(checksum) != sum {
-		log.Warnf("pkg bluetooth; checksum missmatch. checksum is: %x. want: %x", sum, checksum)
-		log.Warnf("pkg bluetooth; data: %s", hex.EncodeToString(bytes))
-
-		b.WriteCmd(CmdFail)
-		return nil, errors.New("checksum missmatch")
-	}
-
-	msg, _err := message.Unmarshal(bytes)
-
-	if _err == nil {
-		b.WriteCmd(CmdSuccess)
-	} else {
-		b.WriteCmd(CmdFail)
-	}
-
-	log.Tracef("pkg bluetooth; Received message:", spew.Sdump(msg))
-
-	return msg, _err
+	return b.parsePackets(data)
 }
 
-func (b *Ble) readMessage(cmd Packet) (*message.Message, error) {
+func (b *Ble) parsePackets(data Packet) (*message.Message, error) {
 	var buf bytes.Buffer
 	var checksum []byte
 
-	if bytes.Equal(CmdSuccess[:1], cmd[:1]) {
-		return nil, nil
-	}
-
-	log.Trace("pkg bluetooth; Reading RTS")
-	if !bytes.Equal(CmdRTS[:1], cmd[:1]) {
-		log.Fatalf("pkg bluetooth; expected command: %x. received command: %x", CmdRTS, cmd)
-	}
-	log.Trace("pkg bluetooth; Sending CTS")
-
-	b.WriteCmd(CmdCTS)
-
-	first, _ := b.ReadData()
-	fragments := int(first[1])
-	expectedIndex := 1
-	oneExtra := false
+	fragments := int(data[1])
 	if fragments == 0 {
-		checksum = first[2:6]
-		len := first[6]
-		end := len + 7
-		if len > 13 {
-			oneExtra = true
-			end = 20
-		}
-		buf.Write(first[7:end])
+		checksum = data[2:6]
+		buf.Write(data[7:])
 	} else {
-		buf.Write(first[2:20])
+		buf.Write(data[2:])
 	}
-	for i := 1; i < fragments; i++ {
+	expectedIndex := 1
+	for i := 1; i <= fragments; i++ {
 		data, _ := b.ReadData()
-		if i == expectedIndex {
-			buf.Write(data[1:20])
+		packetIndex := data[0]
+		if int(packetIndex) == expectedIndex {
+			if i == fragments {
+				len := data[1]
+				checksum = data[2:6]
+				payload := data[6 : len+6]
+				buf.Write(payload)
+			} else {
+				buf.Write(data[1:])
+			}
 		} else {
 			log.Warnf("pkg bluetooth; sending NACK, packet index is wrong")
 			buf.Write(data[:])
@@ -523,21 +482,6 @@ func (b *Ble) readMessage(cmd Packet) (*message.Message, error) {
 			b.WriteCmd(CmdNACK)
 		}
 		expectedIndex++
-	}
-	if fragments != 0 {
-		data, _ := b.ReadData()
-		len := data[1]
-		if len > 14 {
-			oneExtra = true
-			len = 14
-		}
-		checksum = data[2:6]
-		buf.Write(data[6 : len+6])
-	}
-	log.Tracef("pkg bluetooth; One extra: %t", oneExtra)
-	if oneExtra {
-		data, _ := b.ReadData()
-		buf.Write(data[2 : data[1]+2])
 	}
 	bytes := buf.Bytes()
 	sum := crc32.ChecksumIEEE(bytes)
@@ -552,7 +496,25 @@ func (b *Ble) readMessage(cmd Packet) (*message.Message, error) {
 	b.WriteCmd(CmdSuccess)
 
 	msg, _err := message.Unmarshal(bytes)
-	log.Tracef("pkg bluetooth; Received message:", spew.Sdump(msg))
+	log.Tracef("pkg bluetooth; Received message: %s", spew.Sdump(msg))
 
 	return msg, _err
+}
+
+func (b *Ble) readMessage(cmd Packet) (*message.Message, error) {
+
+	if bytes.Equal(CmdSuccess[:1], cmd[:1]) {
+		return nil, nil
+	}
+
+	log.Trace("pkg bluetooth; Reading RTS")
+	if !bytes.Equal(CmdRTS[:1], cmd[:1]) {
+		log.Fatalf("pkg bluetooth; expected command: %x. received command: %x", CmdRTS, cmd[:1])
+	}
+	log.Trace("pkg bluetooth; Sending CTS")
+
+	b.WriteCmd(CmdCTS)
+
+	first, _ := b.ReadData()
+	return b.parsePackets(first)
 }
