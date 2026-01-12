@@ -89,23 +89,31 @@ O5 has additional pairing stages that communicate with Insulet's cloud backend:
 | **AMF Value** | `0xb9b9` (47545) | Same |
 | **AT_CUSTOM_IV** | Type 126 | Type 126 |
 
-### 2.2 Security Identifier (O5 Only)
+### 2.2 Security Identifier (O5 Only - SDK Internal)
 
 | Aspect | DASH | Omnipod 5 |
 |--------|------|-----------|
 | **Security ID** | Not used | `0xCCCCCCCC` |
-| **Usage** | - | Passed to TwiCcmAes.initCcm() |
+| **Usage** | - | TwiSec SDK internal caching |
 
-The Security ID `0xCCCCCCCC` (bytes: -52, -52, -52, -52) is used in O5 when initializing the TwiCcmAes encryption engine. Purpose unclear - may be a product identifier.
+The Security ID `0xCCCCCCCC` (bytes: -52, -52, -52, -52) is used by the TwiSec SDK for **internal context management and caching**, NOT for the actual AES-CCM cryptographic operations.
+
+**Impact on Simulator**: Not needed. The actual encryption uses only CK + nonce, which the simulator already implements correctly.
 
 ### 2.3 IK (Integrity Key) Usage
 
 | Aspect | DASH | Omnipod 5 |
 |--------|------|-----------|
-| **IK from Milenage** | Computed but ignored | May be used |
-| **LTK derivation** | From pairing ECDH | Possibly CK + IK? |
+| **IK from Milenage** | Computed but ignored | Not used in protocol |
+| **Why unused?** | AES-CCM provides authentication | Same |
 
-The O5 documentation mentions "CK + IK → LTK" but the exact derivation needs verification. The simulator currently ignores IK.
+**Analysis**: In standard 3GPP EAP-AKA, IK is used for message integrity with HMAC/CMAC. However, Omnipod uses AES-CCM which provides both confidentiality AND authentication in a single operation. Therefore, IK is not needed.
+
+The user summary's "CK + IK → LTK" appears to be a misinterpretation. The actual flow is:
+1. **Pairing**: ECDH shared secret → CMAC → LTK (stored permanently)
+2. **Session**: EAP-AKA with LTK as K → CK (used for encryption)
+
+**Impact on Simulator**: IK can safely be ignored. CK alone is sufficient for AES-CCM.
 
 ---
 
@@ -206,12 +214,12 @@ The pod simulator has already been updated for O5:
 - ✅ AES-CCM encryption
 - ✅ Correct BLE UUIDs
 
-### Known Issues:
-- ❌ CRC-16 returns 0x0000 (stubbed)
-- ❌ AUTN validation not implemented
-- ⚠️ Pod IV hardcoded (should be random)
-- ⚠️ Security ID not implemented
-- ⚠️ IK ignored (may need investigation)
+### Known Issues (Fixed):
+- ✅ CRC-16 now properly implemented with lookup table from O5 APK
+- ✅ AUTN validation now implemented (validates MAC-A)
+- ✅ Pod IV now randomly generated for each EAP-AKA session
+- ✅ Security ID not needed (SDK internal only)
+- ✅ IK not needed (AES-CCM provides authentication)
 
 ---
 
