@@ -63,9 +63,19 @@ podConf = CMAC_AES(confKey, "KC_2_V" || pod_nonce || pdm_nonce)
 
 | Aspect | DASH | Omnipod 5 |
 |--------|------|-----------|
-| **Nonce Source** | Generated locally | Retrieved from Insulet backend API |
+| **PDM Nonce Source** | Generated locally | Retrieved from Insulet backend API |
+| **Pod Nonce Source** | Generated locally | Generated locally |
 | **Internet Required** | No | Yes (initial pairing only) |
 | **Pairing Stages** | - | RetrievePdmNonceStage, RetrievePhoneControlNonceStage |
+
+**Nonce Flow in Pairing:**
+```
+1. PDM retrieves nonce from Insulet backend (O5 only)
+2. PDM sends: SPS1 = [64-byte public key] + [16-byte PDM nonce]
+3. Pod generates: random 16-byte pod nonce
+4. Pod sends: SPS1 = [64-byte public key] + [16-byte pod nonce]
+5. Both parties derive keys using BOTH nonces
+```
 
 O5 has additional pairing stages that communicate with Insulet's cloud backend:
 - `RetrievePdmNonceStage` - GET /api/nonce
@@ -73,7 +83,12 @@ O5 has additional pairing stages that communicate with Insulet's cloud backend:
 - `RetrievePdmPropertiesStage`
 - `RegistrationStage`
 
-**Impact on Simulator:** The simulator generates nonces locally, which should work fine since the pod doesn't validate nonce source.
+**Impact on Simulator:** The backend nonces are **transparent to the pod**. The pod:
+1. Generates its own random nonce (already implemented in `computeMyData()`)
+2. Receives PDM's nonce from SPS1 message (doesn't care where it came from)
+3. Uses both nonces for key derivation (already implemented)
+
+The simulator works without any changes because it just accepts whatever nonce the PDM sends.
 
 ---
 
