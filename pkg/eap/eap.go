@@ -2,6 +2,7 @@ package eap
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 
@@ -184,12 +185,22 @@ func NewEapAkaChallenge(k []byte, sqn uint64) *EapAkaChallenge {
 	op, _ := hex.DecodeString("cdc202d5123e20f62b6d676ac72cb318")
 	// amf, _ := hex.DecodeString("b9b9")
 	log.Debugf("Starting EAP-AKA session with SQN(after incrementing SQN): %d", sqn+1)
+
+	// Generate random Pod IV (4 bytes) for each EAP-AKA session
+	podIV := make([]byte, 4)
+	if _, err := rand.Read(podIV); err != nil {
+		// Fallback to deterministic value if random fails (should not happen)
+		log.Warnf("Failed to generate random Pod IV, using fallback: %v", err)
+		podIV = []byte{0xa, 0xa, 0xa, 0xa}
+	}
+	log.Debugf("Generated Pod IV: %x", podIV)
+
 	return &EapAkaChallenge{
 		k:     k,
 		op:    op,
 		Sqn:   sqn + 1,
-		amf:   47545,                      // b9b9
-		podIV: []byte{0xa, 0xa, 0xa, 0xa}, // constant for now, easier to debug. TODO
+		amf:   47545, // b9b9
+		podIV: podIV,
 	}
 }
 
