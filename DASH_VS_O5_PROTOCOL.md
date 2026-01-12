@@ -140,7 +140,9 @@ The user summary's "CK + IK → LTK" appears to be a misinterpretation. The actu
 | **Control Char** | Not used | `1a7e2442-e3ed-4464-8b7e-751e03d0dc5f` |
 | **Advertising** | "AP <ID> ..." | Same format |
 
-O5 has an additional Control characteristic (`1a7e2442`) but its usage is unclear.
+O5 has an additional Control characteristic (`1a7e2442`) but its purpose is unclear from the decompiled code. The simulator works without it, suggesting it may be optional or used for advanced features not implemented in Loop.
+
+**Impact on Simulator**: Not needed for basic operation.
 
 ---
 
