@@ -143,6 +143,19 @@ func (p *Pod) StartActivation() {
 	// send POD public key and nonce
 	p.ble.WriteMessage(msg)
 
+	// read PDM extended data (SPS2.1)
+	msg, _ = p.ble.ReadMessage()
+	if err := pair.ParseSPS21(msg); err != nil {
+		log.Warnf("pkg pod; error parsing SPS2.1 %s", err)
+	}
+
+	// send POD extended data (SPS2.1)
+	msg, err = pair.GenerateSPS21()
+	if err != nil {
+		log.Fatal(err)
+	}
+	p.ble.WriteMessage(msg)
+
 	// read PDM conf value
 	msg, _ = p.ble.ReadMessage()
 	pair.ParseSPS2(msg)

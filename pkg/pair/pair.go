@@ -20,9 +20,12 @@ const (
 
 	sps0   = "SPS0="
 	sps1   = "SPS1="
+	sps21  = "SPS2.1="
 	sps2   = "SPS2="
 	sp0gp0 = "SP0,GP0"
 	p0     = "P0="
+
+	defaultSPS21Size = 641
 )
 
 type Pair struct {
@@ -35,6 +38,8 @@ type Pair struct {
 	pdmNonce  []byte
 	pdmConf   []byte
 	sps0      []byte
+	sps21Len  int
+	sps21Data []byte
 
 	sharedSecret []byte
 	pdmID        []byte
@@ -96,7 +101,11 @@ func (c *Pair) ParseSPS0(msg *message.Message) error {
 	}
 
 	log.Infof("Received SPS0  %x", sp[sps0])
-	copy(c.pdmNonce, []byte(sps0))
+	c.sps0 = sp[sps0]
+	expectedSps0 := []byte{0x00, 0x01, 0x09, 0xa2, 0x18}
+	if !bytes.Equal(c.sps0, expectedSps0) {
+		log.Warnf("Unexpected SPS0 payload %x (expected %x)", c.sps0, expectedSps0)
+	}
 
 	err = c.computeMyData()
 	if err != nil {
@@ -189,6 +198,23 @@ func (c *Pair) ParseSPS2(msg *message.Message) error {
 	return nil
 }
 
+func (c *Pair) ParseSPS21(msg *message.Message) error {
+	sp, err := parseStringByte([]string{sps21}, msg.Payload)
+	if err != nil {
+		log.Warnf("SPS2.1 Message :%s", spew.Sdump(msg))
+		log.Warnf("SPS2.1 parse failed, continuing without validation: %v", err)
+		return nil
+	}
+	c.sps21Data = sp[sps21]
+	c.sps21Len = len(c.sps21Data)
+	if c.sps21Len == 0 {
+		log.Warn("SPS2.1 payload was empty; continuing without validation")
+		return nil
+	}
+	log.Infof("Received SPS2.1 payload (%d bytes)", c.sps21Len)
+	return nil
+}
+
 func (c *Pair) GenerateSPS2() (*message.Message, error) {
 	var err error
 	sp := make(map[string][]byte)
@@ -200,6 +226,26 @@ func (c *Pair) GenerateSPS2() (*message.Message, error) {
 		return nil, err
 	}
 	log.Debugf("Generated SPS2: %x", msg.Payload)
+	return msg, nil
+}
+
+func (c *Pair) GenerateSPS21() (*message.Message, error) {
+	var err error
+	sp := make(map[string][]byte)
+	responseSize := c.sps21Len - 1
+	if c.sps21Len == 0 {
+		responseSize = defaultSPS21Size
+	} else if responseSize < 0 {
+		responseSize = 0
+	}
+	sp[sps21] = bytes.Repeat([]byte{0x00}, responseSize)
+
+	msg := message.NewMessage(message.MessageTypePairing, c.podID, c.pdmID)
+	msg.Payload, err = buildStringByte([]string{sps21}, sp)
+	if err != nil {
+		return nil, err
+	}
+	log.Debugf("Generated SPS2.1 payload (%d bytes)", responseSize)
 	return msg, nil
 }
 
