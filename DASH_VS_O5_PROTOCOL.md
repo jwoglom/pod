@@ -40,11 +40,14 @@ c.sharedSecret, _ = privateKey.ECDH(publicKey)
 | 1 | SP1/SP2 (IDs) | SP1/SP2 (IDs) |
 | 2 | - | **SPS0** (new stage) |
 | 3 | SPS1 (32B pub + 16B nonce) | SPS1 (64B pub + 16B nonce) |
-| 4 | SPS2 (confirmation) | SPS2 (confirmation) |
-| 5 | SP0,GP0 | SP0,GP0 |
-| 6 | P0 (0xa5) | P0 (0xa5) |
+| 4 | - | **SPS2.1** (extended data exchange) |
+| 5 | SPS2 (confirmation) | SPS2 (confirmation) |
+| 6 | SP0,GP0 | SP0,GP0 |
+| 7 | P0 (0xa5) | P0 (0xa5) |
 
-**SPS0 is NEW in O5** - Contains constant value `0x00 0x00 0x09 0x91 0x29`
+**SPS0 is NEW in O5** - PDM sends `0x00 0x01 0x09 0xa2 0x18`, pod replies with `0x00 0x00 0x09 0x91 0x29` (algorithm acceptance).
+
+**SPS2.1 is NEW in O5** - Large (~650B) extended data exchange (certs/attestation) before SPS2 confirmation values.
 
 ### 1.3 Key Derivation (IDENTICAL)
 
@@ -78,8 +81,8 @@ podConf = CMAC_AES(confKey, "KC_2_V" || pod_nonce || pdm_nonce)
 ```
 
 O5 has additional pairing stages that communicate with Insulet's cloud backend:
-- `RetrievePdmNonceStage` - GET /api/nonce
-- `RetrievePhoneControlNonceStage` - GET /api/phone/nonce
+- `RetrievePdmNonceStage` - `GET /api/v3/provisioning/nonce`
+- `RetrievePhoneControlNonceStage` - `POST /api/v3/provisioning/nonce` (nonce delivered via FCM push)
 - `RetrievePdmPropertiesStage`
 - `RegistrationStage`
 
@@ -104,6 +107,15 @@ The simulator works without any changes because it just accepts whatever nonce t
 | **AMF Value** | `0xb9b9` (47545) | Same |
 | **AT_CUSTOM_IV** | Type 126 | Type 126 |
 
+**Nonce Construction (O5/DASH):**
+```
+Nonce = PDM_IV (4B) || Pod_IV (4B) || Sequence (5B)
+```
+
+**EAP-AKA Exchange (O5/DASH):**
+- EAP-Request/AKA-Challenge includes AT_RAND, AT_AUTN, AT_CUSTOM_IV (PDM IV).
+- EAP-Response/AKA-Challenge includes AT_RES, AT_CUSTOM_IV (Pod IV).
+
 ### 2.2 Security Identifier (O5 Only - SDK Internal)
 
 | Aspect | DASH | Omnipod 5 |
@@ -124,7 +136,7 @@ The Security ID `0xCCCCCCCC` (bytes: -52, -52, -52, -52) is used by the TwiSec S
 
 **Analysis**: In standard 3GPP EAP-AKA, IK is used for message integrity with HMAC/CMAC. However, Omnipod uses AES-CCM which provides both confidentiality AND authentication in a single operation. Therefore, IK is not needed.
 
-The user summary's "CK + IK → LTK" appears to be a misinterpretation. The actual flow is:
+The "CK + IK → LTK" interpretation is incorrect. The actual flow is:
 1. **Pairing**: ECDH shared secret → CMAC → LTK (stored permanently)
 2. **Session**: EAP-AKA with LTK as K → CK (used for encryption)
 
@@ -143,6 +155,8 @@ The user summary's "CK + IK → LTK" appears to be a misinterpretation. The actu
 | **Associated Data** | 16-byte header | 16-byte header |
 | **Direction Bit** | MSB of seq (0x80) | Same |
 
+Nonce is composed as `PDM_IV || Pod_IV || sequence` (5-byte sequence counter).
+
 ---
 
 ## 4. BLE Communication (IDENTICAL)
@@ -158,6 +172,8 @@ The user summary's "CK + IK → LTK" appears to be a misinterpretation. The actu
 O5 has an additional Control characteristic (`1a7e2442`) but its purpose is unclear from the decompiled code. The simulator works without it, suggesting it may be optional or used for advanced features not implemented in Loop.
 
 **Impact on Simulator**: Not needed for basic operation.
+
+**Initial Handshake (O5/DASH):** PDM sends CMD6 (`01 04 00 <PDM_ID>`) after GATT connection to announce its ID and begin pairing.
 
 ---
 
@@ -203,12 +219,12 @@ All command types are the same:
 1. **Elliptic Curve**: Curve25519 → P-256
 2. **Public Key Size**: 32 bytes → 64 bytes
 3. **SPS0 Stage**: Not present → Required
+4. **SPS2.1 Stage**: Not present → Extended data exchange before SPS2
 
 ### Minor Differences:
-4. **Backend Nonces**: Local → API (transparent to pod)
-5. **Security ID**: Not used → 0xCCCCCCCC (usage unclear)
-6. **Control Characteristic**: Not used → May be used
-7. **IK Usage**: Ignored → Possibly used
+5. **Backend Nonces**: Local → API (transparent to pod)
+6. **Security ID**: Not used → 0xCCCCCCCC (usage unclear)
+7. **Control Characteristic**: Not used → May be used
 
 ### No Changes:
 - Key derivation labels ("TWIt", "KC_2_U", "KC_2_V")
