@@ -174,6 +174,37 @@ func signTranscript(priv *ecdsa.PrivateKey, transcript []byte) ([]byte, error) {
 	return packRS(r, s), nil
 }
 
+// VerifyType4Signature verifies the 64-byte raw r||s ECDSA signature on a
+// Type-4 (ENCRYPTED_SIGNED) command. The signing input is exactly the 16-byte
+// TWi header followed by the AES-CCM ciphertext (including the 8-byte tag);
+// see OmnipodKit BleMessageTransport.swift getCmdMessage signing block.
+//
+// pubkeyRaw is the 64-byte raw P-256 public key (X||Y) extracted from the
+// PDM's TLS leaf certificate at SPS2 time.
+func VerifyType4Signature(pubkeyRaw, header, ciphertext, signatureRaw []byte) (bool, error) {
+	if len(pubkeyRaw) != 64 {
+		return false, fmt.Errorf("VerifyType4Signature: pubkey must be 64 bytes, got %d", len(pubkeyRaw))
+	}
+	if len(signatureRaw) != 64 {
+		return false, fmt.Errorf("VerifyType4Signature: signature must be 64 bytes, got %d", len(signatureRaw))
+	}
+	if len(header) != 16 {
+		return false, fmt.Errorf("VerifyType4Signature: header must be 16 bytes, got %d", len(header))
+	}
+	pub := &ecdsa.PublicKey{
+		Curve: elliptic.P256(),
+		X:     new(big.Int).SetBytes(pubkeyRaw[:32]),
+		Y:     new(big.Int).SetBytes(pubkeyRaw[32:]),
+	}
+	signingInput := make([]byte, 0, len(header)+len(ciphertext))
+	signingInput = append(signingInput, header...)
+	signingInput = append(signingInput, ciphertext...)
+	digest := sha256.Sum256(signingInput)
+	r := new(big.Int).SetBytes(signatureRaw[:32])
+	s := new(big.Int).SetBytes(signatureRaw[32:])
+	return ecdsa.Verify(pub, digest[:], r, s), nil
+}
+
 // verifyTranscript verifies a 64-byte raw r||s signature over a transcript
 // using a public key extracted from a DER cert.
 func verifyTranscript(certDER, transcript, signatureRaw []byte) (bool, error) {

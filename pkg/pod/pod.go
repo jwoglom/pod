@@ -265,6 +265,10 @@ func (p *Pod) StartActivation() {
 		log.Fatalf("pkg pod; could not get LTK %s", err)
 	}
 	log.Infof("pkg pod; LTK %x", p.state.LTK)
+	if pdmKey := pair.PDMPublicKey(); pdmKey != nil {
+		p.state.PDMPublicKey = pdmKey
+		log.Infof("pkg pod; PDM TLS pubkey cached for Type-4 verification")
+	}
 	p.state.EapAkaSeq = 1
 	p.state.Save()
 
@@ -349,6 +353,27 @@ func (p *Pod) CommandLoop(pMsg PodMsgBody) {
 
 		// Lock mutex before we start using/modifying state
 		p.mtx.Lock()
+
+		// Type-4 (ENCRYPTED_SIGNED): verify the controller's ECDSA
+		// signature over [16-byte header || ciphertext-with-tag] before
+		// decrypting. Soft-fail with a warning so transcript-layout drift
+		// doesn't block activation while we iterate.
+		if msg.Type == message.MessageTypeEncryptedSigned {
+			if len(p.state.PDMPublicKey) != 64 {
+				log.Warnf("pkg pod; received Type-4 command but no cached PDM pubkey; skipping signature check")
+			} else if len(msg.Signature) != 64 {
+				log.Warnf("pkg pod; Type-4 message has malformed signature length %d", len(msg.Signature))
+			} else {
+				ok, vErr := pair.VerifyType4Signature(p.state.PDMPublicKey, msg.Raw[:16], msg.Payload, msg.Signature)
+				if vErr != nil {
+					log.Warnf("pkg pod; Type-4 signature verify error: %s", vErr)
+				} else if !ok {
+					log.Warnf("pkg pod; Type-4 signature verification FAILED (continuing)")
+				} else {
+					log.Infof("pkg pod; Type-4 signature verified")
+				}
+			}
+		}
 
 		decrypted, err := encrypt.DecryptMessage(p.state.CK, p.state.NoncePrefix, p.state.NonceSeq, msg)
 		if err != nil {

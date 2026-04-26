@@ -41,16 +41,25 @@ type Message struct {
 	SequenceNumber   uint8
 	AckNumber        uint8
 	Version          uint16
+
+	// Signature is the 64-byte raw r||s ECDSA signature appended after the
+	// AES-CCM ciphertext on MessageTypeEncryptedSigned (Type-4) frames. The
+	// signature is over the 16-byte TWi header concatenated with the
+	// ciphertext (including the 8-byte CCM tag) — see OmnipodKit
+	// BleMessageTransport.swift getCmdMessage. The header's `length` field
+	// reflects only the ciphertext, NOT the signature.
+	Signature []byte
 }
 
 type flag byte
 
 func (f *flag) set(index byte, val bool) {
 	var mask flag = 1 << (7 - index)
-	if !val {
-		return
+	if val {
+		*f |= mask
+	} else {
+		*f &^= mask
 	}
-	*f |= mask
 }
 
 func (f flag) get(index byte) byte {
@@ -75,7 +84,9 @@ func NewMessage(t MessageType, source, destination []byte) *Message {
 
 func (m *Message) Marshal() ([]byte, error) {
 	var buf bytes.Buffer
-	if m.Type == MessageTypeEncrypted && m.EncryptedPayload { // Already encrypted
+	if (m.Type == MessageTypeEncrypted || m.Type == MessageTypeEncryptedSigned) && m.EncryptedPayload {
+		// Already encrypted; for Type-4, m.Raw is expected to include the
+		// 64-byte ECDSA signature appended after the ciphertext.
 		return m.Raw, nil
 	}
 
@@ -166,6 +177,14 @@ func Unmarshal(data []byte) (*Message, error) {
 	ret.Destination = data[12:16]
 	if ret.Type == MessageTypeEncrypted {
 		ret.Payload = data[16 : 16+n+8]
+		ret.EncryptedPayload = true
+	} else if ret.Type == MessageTypeEncryptedSigned {
+		end := 16 + int(n) + 8
+		if end+64 > len(data) {
+			return nil, fmt.Errorf("Type-4 frame truncated: need %d bytes, have %d", end+64, len(data))
+		}
+		ret.Payload = data[16:end]
+		ret.Signature = data[end : end+64]
 		ret.EncryptedPayload = true
 	} else {
 		ret.Payload = data[16 : 16+n]

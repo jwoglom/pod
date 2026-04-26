@@ -33,6 +33,11 @@ type PODState struct {
 	O5PrivateKey []byte `toml:"o5_private_key"`
 	O5CertDER    []byte `toml:"o5_cert_der"`
 
+	// PDMPublicKey is the 64-byte raw P-256 public key (X||Y) extracted from
+	// the PDM's TLS leaf cert during SPS2. Used to verify ECDSA signatures
+	// on inbound Type-4 commands (programBolus, programBasal).
+	PDMPublicKey []byte `toml:"pdm_public_key"`
+
 	PodProgress    response.PodProgress
 	ActivationTime time.Time `toml:"activation_time"`
 
