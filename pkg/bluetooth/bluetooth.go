@@ -47,6 +47,9 @@ type Ble struct {
 
 	dataNotifier    gatt.Notifier
 	dataNotifierMtx sync.Mutex
+
+	heartbeatNotifier    gatt.Notifier
+	heartbeatNotifierMtx sync.Mutex
 }
 
 var DefaultServerOptions = []gatt.Option{
@@ -120,17 +123,43 @@ func New(adapterID string, podId []byte) (*Ble, error) {
 		}
 	}()
 
+	// Heartbeat emitter: once a phone subscribes to the heartbeat
+	// characteristic, push a one-byte notification every 10s. Real O5 pods
+	// use this as a connection keep-alive.
+	go func() {
+		t := time.NewTicker(10 * time.Second)
+		defer t.Stop()
+		for range t.C {
+			b.heartbeatNotifierMtx.Lock()
+			n := b.heartbeatNotifier
+			b.heartbeatNotifierMtx.Unlock()
+			if n == nil || n.Done() {
+				continue
+			}
+			if _, err := n.Write([]byte{0x00}); err != nil {
+				log.Tracef("pkg bluetooth; heartbeat write error: %s", err)
+			}
+		}
+	}()
+
 	// A mandatory handler for monitoring device state.
 	onStateChanged := func(d gatt.Device, s gatt.State) {
 		fmt.Printf("state: %s\n", s)
 		switch s {
 		case gatt.StatePoweredOn:
-			var serviceUUID = gatt.MustParseUUID("1a7e-4024-e3ed-4464-8b7e-751e03d0dc5f")
-			var cmdCharUUID = gatt.MustParseUUID("1a7e-2441-e3ed-4464-8b7e-751e03d0dc5f")  // 0x2E // h 0x000d // vh 0x000e
-			var dataCharUUID = gatt.MustParseUUID("1a7e-2443-e3ed-4464-8b7e-751e03d0dc5f") // 0x16 // h 0x0010 // vh 0x0011
+			// Main pod GATT service (Omnipod 5; same primary UUID as Dash).
+			// Source: OmnipodKit BluetoothServices.swift / BlePodProfile.swift.
+			var serviceUUID = gatt.MustParseUUID("1A7E4024-E3ED-4464-8B7E-751E03D0DC5F")
+			var cmdCharUUID = gatt.MustParseUUID("1A7E2441-E3ED-4464-8B7E-751E03D0DC5F")
+			var dataCharUUID = gatt.MustParseUUID("1A7E2443-E3ED-4464-8B7E-751E03D0DC5F")
 
-			var service2UUID = gatt.MustParseUUID("ECF301E2-674B-4474-94D0-364F3AA653E6")
-			var heartbeatCharUUID = gatt.MustParseUUID("7DED7A6C-CA72-46A7-A3A2-6061F6FDCAEB") // 0x22
+			// Omnipod 5 heartbeat service used for keep-alive.
+			// The pod GATT service UUID is 7DED7A6C... and its single
+			// characteristic is 7DED7A6D... (notify). The ECF301E2... UUID
+			// below is what OmnipodKit scans for in the advertisement, not a
+			// GATT service exposed on the pod.
+			var heartbeatServiceUUID = gatt.MustParseUUID("7DED7A6C-CA72-46A7-A3A2-6061F6FDCAEB")
+			var heartbeatCharUUID = gatt.MustParseUUID("7DED7A6D-CA72-46A7-A3A2-6061F6FDCAEB")
 
 			s := gatt.NewService(serviceUUID)
 
@@ -171,16 +200,15 @@ func New(adapterID string, podId []byte) (*Ble, error) {
 					return 0
 				})
 
-			h := gatt.NewService(service2UUID)
-			hbCharacteristic := s.AddCharacteristic(heartbeatCharUUID)
-			hbCharacteristic.HandleReadFunc(
-				func(rsp gatt.ResponseWriter, req *gatt.ReadRequest) {
-					for range time.Tick(time.Second * 10) {
-						rsp.Write([]byte{0x00})
-						log.Tracef("pkg bluetooth; heartbeat sent")
-					}
-				},
-			)
+			h := gatt.NewService(heartbeatServiceUUID)
+			hbCharacteristic := h.AddCharacteristic(heartbeatCharUUID)
+			hbCharacteristic.HandleNotifyFunc(
+				func(r gatt.Request, n gatt.Notifier) {
+					b.heartbeatNotifierMtx.Lock()
+					b.heartbeatNotifier = n
+					b.heartbeatNotifierMtx.Unlock()
+					log.Infof("pkg bluetooth; handling heartbeat notifications on new connection from: %s", r.Central.ID())
+				})
 
 			err = d.SetServices([]*gatt.Service{s, h})
 			if err != nil {
@@ -196,13 +224,17 @@ func New(adapterID string, podId []byte) (*Ble, error) {
 				podIdArray = podId
 			}
 
-			// CE1F923D-C539-48EA-7300-0AFFFFFFFE00
-			// Advertise device name and service's UUIDs.
+			// CE1F923D-C539-48EA-7300-0AFFFFFFFE00 unpaired, or
+			// CE1F923D-C539-48EA-7300-0A<pdmId>00 once paired. The
+			// ECF301E2... UUID is OmnipodKit's "advertisement" identifier
+			// for the O5 heartbeat service and is co-advertised so the
+			// scanner can find it during discovery (BluetoothServices.swift).
 			mfgData, _ := hex.DecodeString("60030001000000")
 			err = d.AdvertiseNameServicesMfgData(
 				"AP "+strings.ToUpper(hex.EncodeToString(podIdArray))+" 0A95B6110002761B",
 				[]gatt.UUID{
 					gatt.MustParseUUID("CE1F923D-C539-48EA-7300-0A" + hex.EncodeToString(podIdArray) + "00"),
+					gatt.MustParseUUID("ECF301E2-674B-4474-94D0-364F3AA653E6"),
 				},
 				mfgData,
 			)
@@ -229,6 +261,7 @@ func (b *Ble) RefreshAdvertisingWithSpecifiedId(id []byte) error { // 4 bytes, f
 		"AP "+strings.ToUpper(hex.EncodeToString(id))+" 0A95B6110002761B",
 		[]gatt.UUID{
 			gatt.MustParseUUID("CE1F923D-C539-48EA-7300-0A" + hex.EncodeToString(id) + "00"),
+			gatt.MustParseUUID("ECF301E2-674B-4474-94D0-364F3AA653E6"),
 		},
 		mfgData,
 	)
