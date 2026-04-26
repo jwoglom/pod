@@ -29,6 +29,9 @@ const (
 )
 
 type Pair struct {
+	// Mode selects Dash (CMAC chain) or O5 (SHA-256/FIRMWARE_ID) key derivation.
+	Mode Mode
+
 	podPublic  []byte
 	podPrivate []byte
 	podNonce   []byte
@@ -46,7 +49,10 @@ type Pair struct {
 	podID        []byte
 
 	ltk     []byte
-	confKey []byte // key used to sign the "Conf" values
+	confKey []byte // key used to sign the "Conf" values; Dash only
+
+	// O5-only: 16-byte AES-CCM key for SPS2.1/SPS2.
+	conf []byte
 }
 
 func parseStringByte(expectedNames []string, data []byte) (map[string][]byte, error) {
@@ -307,7 +313,22 @@ func (c *Pair) computePairData() error {
 	if err != nil {
 		return err
 	}
-	log.Infof("Donna LTK %x :: %d", c.sharedSecret, len(c.sharedSecret))
+	log.Infof("Shared secret %x :: %d", c.sharedSecret, len(c.sharedSecret))
+
+	if c.Mode == ModeO5 {
+		conf, ltk, err := o5DeriveKeys(c.pdmPublic, c.podPublic, c.sharedSecret)
+		if err != nil {
+			return err
+		}
+		c.conf = conf
+		c.ltk = ltk
+		log.Infof("O5 conf key %x", c.conf)
+		log.Infof("O5 LTK      %x", c.ltk)
+		// SPS2.1/SPS2 in O5 are AES-CCM payloads, not CMAC confirmation values;
+		// they are populated in dedicated handlers (Step 3). Skip the Dash
+		// CMAC chain.
+		return nil
+	}
 
 	//first_key = data.pod_public[-4:] + data.pdm_public[-4:] + data.pod_nonce[-4:] + data.pdm_nonce[-4:]
 	var endSize = 4

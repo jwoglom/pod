@@ -111,6 +111,8 @@ $ ./pod  --help
 Usage of ./pod:
   -fresh
         start fresh. not activated, empty state
+  -mode string
+        pairing mode: dash or o5 (default "o5")
   -state string
         pod state (default "state.toml")
 

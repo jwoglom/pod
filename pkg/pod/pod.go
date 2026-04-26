@@ -31,6 +31,7 @@ type PodMsgBody struct {
 type Pod struct {
 	ble            *bluetooth.Ble
 	state          *PODState
+	pairMode       pair.Mode
 	mtx            sync.Mutex
 	webMessageHook func([]byte)
 }
@@ -39,7 +40,7 @@ type Pod struct {
 var crashBeforeProcessingCommand bool
 var crashAfterProcessingCommand bool
 
-func New(ble *bluetooth.Ble, stateFile string, freshState bool) *Pod {
+func New(ble *bluetooth.Ble, stateFile string, freshState bool, pairMode pair.Mode) *Pod {
 	var err error
 
 	state := &PODState{
@@ -55,8 +56,9 @@ func New(ble *bluetooth.Ble, stateFile string, freshState bool) *Pod {
 	}
 
 	ret := &Pod{
-		ble:   ble,
-		state: state,
+		ble:      ble,
+		state:    state,
+		pairMode: pairMode,
 	}
 
 	return ret
@@ -101,7 +103,7 @@ func (p *Pod) StartAcceptingCommands() {
 func (p *Pod) StartActivation() {
 	log.Infof("pkg pod; starting activation.")
 
-	pair := &pair.Pair{}
+	pair := &pair.Pair{Mode: p.pairMode}
 
 	firstCmd, _ := p.ble.ReadCmd()
 	log.Infof("pkg pod; got first command: as string: %s", firstCmd)
