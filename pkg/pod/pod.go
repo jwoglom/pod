@@ -5,9 +5,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/avereha/pod/pkg/aid"
 	"github.com/avereha/pod/pkg/bluetooth"
 	"github.com/avereha/pod/pkg/command"
 	"github.com/avereha/pod/pkg/eap"
+	"github.com/avereha/pod/pkg/message"
 	"github.com/avereha/pod/pkg/pair"
 
 	"github.com/avereha/pod/pkg/encrypt"
@@ -87,6 +89,54 @@ func (p *Pod) notifyStateChange() {
 	} else {
 		log.Infof("No webMessageHook")
 	}
+}
+
+// handleAIDCommand parses a decrypted AID setup command, builds the matching
+// ASCII response, encrypts it, and writes it back to the controller. It also
+// handles the post-response ACK round-trip that the existing CommandLoop does
+// inline for standard commands.
+//
+// Caller must hold p.mtx. This function does NOT release the mutex.
+func (p *Pod) handleAIDCommand(reqMsg *message.Message, plaintext []byte) {
+	cmd, err := aid.Parse(plaintext)
+	if err != nil {
+		log.Errorf("pkg pod; AID parse failed: %s", err)
+		return
+	}
+	log.Infof("pkg pod; AID %d %s.%s data=%q", cmd.Kind, cmd.Feature, cmd.Attribute, string(cmd.Data))
+
+	respPayload := cmd.BuildResponse()
+	log.Infof("pkg pod; AID response: %q", string(respPayload))
+
+	p.state.MsgSeq++
+	rsp := message.NewMessage(message.MessageTypeEncrypted, reqMsg.Destination, reqMsg.Source)
+	rsp.Payload = respPayload
+	rsp.SequenceNumber = p.state.MsgSeq
+	rsp.Ack = true
+	rsp.AckNumber = reqMsg.SequenceNumber + 1
+	rsp.Eqos = 1
+
+	encrypted, err := encrypt.EncryptMessage(p.state.CK, p.state.NoncePrefix, p.state.NonceSeq, rsp)
+	if err != nil {
+		log.Fatalf("pkg pod; AID encrypt response: %s", err)
+	}
+	p.state.NonceSeq++
+	p.state.Save()
+	p.ble.WriteMessage(encrypted)
+
+	// Read the controller's ACK and advance the nonce counter so subsequent
+	// messages stay in sync.
+	ackMsg, _ := p.ble.ReadMessage()
+	if ackMsg != nil {
+		ackPlain, err := encrypt.DecryptMessage(p.state.CK, p.state.NoncePrefix, p.state.NonceSeq, ackMsg)
+		if err != nil {
+			log.Warnf("pkg pod; AID ACK decrypt failed: %s", err)
+		} else if len(ackPlain.Payload) != 0 {
+			log.Warnf("pkg pod; AID ACK had non-empty payload (%d bytes); ignoring", len(ackPlain.Payload))
+		}
+		p.state.NonceSeq++
+	}
+	p.state.Save()
 }
 
 // ensurePodIdentity returns the pod's stable P-256 keypair + self-signed cert,
@@ -305,6 +355,16 @@ func (p *Pod) CommandLoop(pMsg PodMsgBody) {
 			log.Fatalf("pkg pod; could not decrypt message: %s", err)
 		}
 		p.state.NonceSeq++
+
+		// O5 AID setup commands (UTC, TDI, BG profile, DIA, EGV, history,
+		// pod status) arrive in this same encrypted stream but use a plain
+		// ASCII key=value protocol instead of SLPE-wrapped Omnipod commands.
+		// They run between AssignAddress and SetupPod during pairing.
+		if aid.IsAIDPayload(decrypted.Payload) {
+			p.handleAIDCommand(msg, decrypted.Payload)
+			p.mtx.Unlock()
+			continue
+		}
 
 		cmd, err := command.Unmarshal(decrypted.Payload)
 		if err != nil {
