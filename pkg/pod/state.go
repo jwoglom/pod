@@ -54,6 +54,15 @@ type PODState struct {
 	ExtendedBolusActive bool      `toml:"extended_bolus_active"`
 	BasalActive         bool      `toml:"basal_active"`
 
+	// Pulse-by-pulse bolus accounting. While a bolus is active these record
+	// the snapshot taken at bolus start; Reservoir / Delivered remain at
+	// their pre-bolus values until the bolus settles (see EffectiveDelivery
+	// in pod.go). BolusPulses == 0 means no bolus is in flight.
+	BolusPulses           uint16    `toml:"bolus_pulses"`
+	BolusStartTime        time.Time `toml:"bolus_start_time"`
+	BolusReservoirAtStart uint16    `toml:"bolus_reservoir_at_start"`
+	BolusDeliveredAtStart uint16    `toml:"bolus_delivered_at_start"`
+
 	Filename string
 }
 

@@ -11,6 +11,7 @@ import (
 	"github.com/avereha/pod/pkg/eap"
 	"github.com/avereha/pod/pkg/message"
 	"github.com/avereha/pod/pkg/pair"
+	"github.com/avereha/pod/pkg/pod/delivery"
 
 	"github.com/avereha/pod/pkg/encrypt"
 	"github.com/avereha/pod/pkg/response"
@@ -475,18 +476,19 @@ func (p *Pod) makeGeneralStatusResponse() response.Response {
 
 	var now = time.Now()
 	var tempBasalActive = p.state.TempBasalEnd.After(now)
+	delivered, reservoir := p.EffectiveDelivery()
 
 	return &response.GeneralStatusResponse{
 		Seq:                 0,
 		LastProgSeqNum:      p.state.LastProgSeqNum,
-		Reservoir:           p.state.Reservoir,
+		Reservoir:           reservoir,
 		Alerts:              p.state.ActiveAlertSlots,
 		BolusActive:         p.state.BolusEnd.After(now),
 		TempBasalActive:     tempBasalActive,
 		BasalActive:         p.state.BasalActive && !tempBasalActive,
 		ExtendedBolusActive: p.state.ExtendedBolusActive,
 		PodProgress:         p.state.PodProgress,
-		Delivered:           p.state.Delivered,
+		Delivered:           delivered,
 		MinutesActive:       p.state.MinutesActive(),
 	}
 }
@@ -495,18 +497,19 @@ func (p *Pod) makeDetailedStatusResponse() response.Response {
 
 	var now = time.Now()
 	var tempBasalActive = p.state.TempBasalEnd.After(now)
+	delivered, reservoir := p.EffectiveDelivery()
 
 	return &response.DetailedStatusResponse{
 		Seq:                 0,
 		LastProgSeqNum:      p.state.LastProgSeqNum,
-		Reservoir:           p.state.Reservoir,
+		Reservoir:           reservoir,
 		Alerts:              p.state.ActiveAlertSlots,
 		BolusActive:         p.state.BolusEnd.After(now),
 		TempBasalActive:     tempBasalActive,
 		BasalActive:         p.state.BasalActive && !tempBasalActive,
 		ExtendedBolusActive: p.state.ExtendedBolusActive,
 		PodProgress:         p.state.PodProgress,
-		Delivered:           p.state.Delivered,
+		Delivered:           delivered,
 		MinutesActive:       p.state.MinutesActive(),
 		FaultEvent:          p.state.FaultEvent,
 		FaultEventTime:      p.state.FaultTime,
@@ -561,12 +564,17 @@ func (p *Pod) handleCommand(cmd command.Command) {
 			p.state.TempBasalEnd = time.Now().Add(time.Duration(c.Duration) * time.Hour / 2)
 		}
 
-		// Programming bolus; just immediately decrement reservoir
-		// Would be nice to eventually simulate actual pulses over time.
+		// Programming bolus: record a snapshot at start so we can return
+		// pulse-by-pulse partial values in subsequent status responses, and
+		// settle Reservoir / Delivered when the bolus completes (or is
+		// cancelled). 2 seconds per pulse matches a real Omnipod 5.
 		if c.TableNum == 2 {
-			p.state.Delivered += c.Pulses
-			p.state.Reservoir -= c.Pulses
-			p.state.BolusEnd = time.Now().Add(time.Duration(c.Pulses) * time.Second * 2)
+			p.settleBolusIfDone() // settle any prior, just in case
+			p.state.BolusPulses = c.Pulses
+			p.state.BolusStartTime = time.Now()
+			p.state.BolusReservoirAtStart = p.state.Reservoir
+			p.state.BolusDeliveredAtStart = p.state.Delivered
+			p.state.BolusEnd = p.state.BolusStartTime.Add(time.Duration(c.Pulses) * time.Second * 2)
 		}
 
 		if crashAfterProcessingCommand {
@@ -581,6 +589,8 @@ func (p *Pod) handleCommand(cmd command.Command) {
 		}
 	case *command.StopDelivery:
 		if c.StopBolus {
+			// Settle whatever has been delivered so far before clearing.
+			p.settlePartialBolus()
 			p.state.BolusEnd = time.Time{}
 			p.state.ExtendedBolusActive = false
 		}
@@ -599,6 +609,49 @@ func (p *Pod) handleCommand(cmd command.Command) {
 		log.Debugf("pkg pod; Updating LastProgSeqNum = %d", cmd.GetSeq())
 		p.state.LastProgSeqNum = cmd.GetSeq()
 	}
+}
+
+// EffectiveDelivery returns the (delivered, reservoir) values to publish in a
+// status response. While a bolus is in flight, these are interpolated based
+// on elapsed time vs the bolus duration (2 seconds per pulse). When the
+// bolus has fully delivered the values are settled into PODState; when no
+// bolus is active the persisted values are returned unchanged.
+//
+// Caller must hold p.mtx.
+func (p *Pod) EffectiveDelivery() (delivered uint16, reservoir uint16) {
+	p.settleBolusIfDone()
+	if p.state.BolusPulses == 0 {
+		return p.state.Delivered, p.state.Reservoir
+	}
+	partial := delivery.PartialPulses(p.state.BolusPulses, p.state.BolusStartTime, time.Now())
+	return p.state.BolusDeliveredAtStart + partial, p.state.BolusReservoirAtStart - partial
+}
+
+// settleBolusIfDone moves a fully-completed bolus's pulses from the in-flight
+// snapshot into Reservoir / Delivered and clears the in-flight state.
+func (p *Pod) settleBolusIfDone() {
+	if p.state.BolusPulses == 0 {
+		return
+	}
+	if p.state.BolusEnd.IsZero() || time.Now().Before(p.state.BolusEnd) {
+		return
+	}
+	p.state.Delivered = p.state.BolusDeliveredAtStart + p.state.BolusPulses
+	p.state.Reservoir = p.state.BolusReservoirAtStart - p.state.BolusPulses
+	p.state.BolusPulses = 0
+}
+
+// settlePartialBolus is called on a StopDelivery cancellation: it locks in
+// however many pulses have been delivered up to right now, then clears the
+// in-flight state.
+func (p *Pod) settlePartialBolus() {
+	if p.state.BolusPulses == 0 {
+		return
+	}
+	partial := delivery.PartialPulses(p.state.BolusPulses, p.state.BolusStartTime, time.Now())
+	p.state.Delivered = p.state.BolusDeliveredAtStart + partial
+	p.state.Reservoir = p.state.BolusReservoirAtStart - partial
+	p.state.BolusPulses = 0
 }
 
 func (p *Pod) SetReservoir(newVal float32) {
