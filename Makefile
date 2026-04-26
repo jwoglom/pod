@@ -15,13 +15,17 @@ pi: frontend-build
 	GOOS=linux GOARCH=arm go build -o pod ./
 
 frontend-install:
-	cd frontend && npm ci
+	cd frontend && npm install
 
 frontend-build: frontend-install
 	cd frontend && npm run build
+	# Vite's emptyOutDir wipes the directory; restore the placeholder so
+	# subsequent `git status` and a later `make clean` round-trip stay
+	# consistent.
+	touch frontend/build/.placeholder
 
 frontend-dev:
-	cd frontend && npm start
+	cd frontend && npm run dev
 
 go-build:
 	go build -o pod ./

@@ -1,4 +1,3 @@
-import logo from './logo.svg';
 import './App.css';
 import { connect, sendMsg } from "./api";
 import React, { Component, useEffect, useState } from 'react'
