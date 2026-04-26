@@ -89,6 +89,25 @@ func (p *Pod) notifyStateChange() {
 	}
 }
 
+// ensurePodIdentity returns the pod's stable P-256 keypair + self-signed cert,
+// generating and persisting it on first use. Each pod simulator instance has
+// a stable cryptographic identity once activated, mirroring real pods.
+func (p *Pod) ensurePodIdentity() (*pair.PodIdentity, error) {
+	if len(p.state.O5PrivateKey) > 0 && len(p.state.O5CertDER) > 0 {
+		return pair.LoadPodIdentity(p.state.O5PrivateKey, p.state.O5CertDER)
+	}
+	id, err := pair.NewPodIdentity()
+	if err != nil {
+		return nil, err
+	}
+	p.state.O5PrivateKey = id.PrivateScalar()
+	p.state.O5CertDER = id.CertDER
+	if err := p.state.Save(); err != nil {
+		log.Warnf("pkg pod; could not persist pod identity: %s", err)
+	}
+	return id, nil
+}
+
 func (p *Pod) StartAcceptingCommands() {
 	log.Infof("pkg pod; Listening for commands")
 	p.ble.StartMessageLoop()
@@ -104,6 +123,14 @@ func (p *Pod) StartActivation() {
 	log.Infof("pkg pod; starting activation.")
 
 	pair := &pair.Pair{Mode: p.pairMode}
+
+	if pair.IsO5() {
+		identity, err := p.ensurePodIdentity()
+		if err != nil {
+			log.Fatalf("pkg pod; could not load/create pod identity: %s", err)
+		}
+		pair.SetIdentity(identity)
+	}
 
 	firstCmd, _ := p.ble.ReadCmd()
 	log.Infof("pkg pod; got first command: as string: %s", firstCmd)

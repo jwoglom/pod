@@ -31,3 +31,7 @@ func ParseMode(s string) (Mode, error) {
 	}
 	return 0, fmt.Errorf("invalid pair mode %q (want dash or o5)", s)
 }
+
+// IsO5 returns true when this pairing context is operating in Omnipod 5 mode.
+// Useful from packages where the local symbol `pair` shadows this package.
+func (c *Pair) IsO5() bool { return c.Mode == ModeO5 }

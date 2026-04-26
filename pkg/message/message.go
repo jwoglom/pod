@@ -14,6 +14,12 @@ const (
 	MessageTypeEncrypted
 	MessageTypeSessionEstablishment
 	MessageTypePairing
+	// MessageTypeEncryptedSigned is the Omnipod 5 wire flag for an
+	// AES-CCM-encrypted payload that ALSO carries a 64-byte raw ECDSA
+	// signature inside the plaintext (used by SPS2 during pairing and by
+	// programBolus/programBasal post-pairing).
+	MessageTypeEncryptedSigned
+
 	MagicPattern = "TW"
 )
 
@@ -143,7 +149,7 @@ func Unmarshal(data []byte) (*Message, error) {
 	ret.Gateway = f.get(3) == 1
 	ret.Type = MessageType(f.get(7) | f.get(6)<<1 | f.get(5)<<2 | f.get(4)<<3)
 
-	if ret.Type > MessageTypePairing {
+	if ret.Type > MessageTypeEncryptedSigned {
 		return nil, fmt.Errorf("invalid message type found in %x", data)
 	}
 	if ret.Version != 0 {

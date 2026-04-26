@@ -51,8 +51,18 @@ type Pair struct {
 	ltk     []byte
 	confKey []byte // key used to sign the "Conf" values; Dash only
 
-	// O5-only: 16-byte AES-CCM key for SPS2.1/SPS2.
-	conf []byte
+	// O5-only: 16-byte AES-CCM key for SPS2.1/SPS2 plus the per-direction
+	// nonce state and the pod's signing identity.
+	conf       []byte
+	nonceState *spsNonceState
+	identity   *PodIdentity
+}
+
+// SetIdentity attaches a P-256 keypair + self-signed cert that the pod uses
+// to sign the SPS2 channel-binding transcript. Required in O5 mode before
+// SPS2.1/SPS2 are processed.
+func (c *Pair) SetIdentity(id *PodIdentity) {
+	c.identity = id
 }
 
 func parseStringByte(expectedNames []string, data []byte) (map[string][]byte, error) {
@@ -197,6 +207,31 @@ func (c *Pair) ParseSPS2(msg *message.Message) error {
 		return err
 	}
 
+	if c.Mode == ModeO5 {
+		// Build the PDM transcript using the nonce state as it stands BEFORE
+		// decryption advances pdmNonce — this matches the controller's view
+		// at sign time (see O5KeyExchange.swift buildChannelBindingTranscript).
+		transcript := buildPDMTranscript(c.pdmPublic, c.podPublic, c.nonceState.pdm, c.nonceState.pod)
+
+		certDER, sig, err := decryptSPS2(c.conf, c.nonceState, sp[sps2])
+		if err != nil {
+			return fmt.Errorf("SPS2 decrypt: %w", err)
+		}
+		log.Infof("Decrypted PDM SPS2: %d-byte cert + 64-byte sig", len(certDER))
+
+		ok, vErr := verifyTranscript(certDER, transcript, sig)
+		if vErr != nil {
+			log.Warnf("PDM SPS2 signature verification setup failed: %v (continuing)", vErr)
+			return nil
+		}
+		if !ok {
+			log.Warnf("PDM SPS2 signature verification FAILED (continuing — transcript layout may differ across firmware)")
+		} else {
+			log.Infof("PDM SPS2 signature verified")
+		}
+		return nil
+	}
+
 	if !bytes.Equal(c.pdmConf, sp[sps2]) {
 		return fmt.Errorf("Invalid conf value. Expected: %x. Got %x", c.pdmConf, sp[sps2])
 	}
@@ -217,41 +252,86 @@ func (c *Pair) ParseSPS21(msg *message.Message) error {
 		log.Warn("SPS2.1 payload was empty; continuing without validation")
 		return nil
 	}
+
+	if c.Mode == ModeO5 {
+		certDER, err := decryptSPS21(c.conf, c.nonceState, c.sps21Data)
+		if err != nil {
+			log.Warnf("PDM SPS2.1 decrypt failed: %v (continuing)", err)
+			return nil
+		}
+		log.Infof("Decrypted PDM SPS2.1: %d-byte intermediate-CA DER", len(certDER))
+		c.sps21Data = certDER
+		return nil
+	}
+
 	log.Infof("Received SPS2.1 payload (%d bytes)", c.sps21Len)
 	return nil
 }
 
 func (c *Pair) GenerateSPS2() (*message.Message, error) {
-	var err error
 	sp := make(map[string][]byte)
-	sp[sps2] = c.podConf
+
+	if c.Mode == ModeO5 {
+		if c.identity == nil {
+			return nil, errors.New("GenerateSPS2: pod identity not set in O5 mode (call SetIdentity)")
+		}
+		// At sign time, nonceState mirrors the moment we are about to send
+		// SPS2: pdmNonce already advanced by SPS2.1 receive AND SPS2 receive,
+		// podNonce already advanced by SPS2.1 send. That matches what the
+		// controller's verifier expects (see buildPodTranscript docs).
+		transcript := buildPodTranscript(c.pdmPublic, c.podPublic, c.nonceState.pdm, c.nonceState.pod)
+		sig, err := signTranscript(c.identity.PrivateKey, transcript)
+		if err != nil {
+			return nil, fmt.Errorf("SPS2 sign: %w", err)
+		}
+		ct, err := encryptSPS2(c.conf, c.nonceState, c.identity.CertDER, sig)
+		if err != nil {
+			return nil, fmt.Errorf("SPS2 encrypt: %w", err)
+		}
+		sp[sps2] = ct
+	} else {
+		sp[sps2] = c.podConf
+	}
 
 	msg := message.NewMessage(message.MessageTypePairing, c.podID, c.pdmID)
-	msg.Payload, err = buildStringByte([]string{sps2}, sp)
+	payload, err := buildStringByte([]string{sps2}, sp)
 	if err != nil {
 		return nil, err
 	}
-	log.Debugf("Generated SPS2: %x", msg.Payload)
+	msg.Payload = payload
+	log.Debugf("Generated SPS2 (%d bytes)", len(sp[sps2]))
 	return msg, nil
 }
 
 func (c *Pair) GenerateSPS21() (*message.Message, error) {
-	var err error
 	sp := make(map[string][]byte)
-	responseSize := c.sps21Len - 1
-	if c.sps21Len == 0 {
-		responseSize = defaultSPS21Size
-	} else if responseSize < 0 {
-		responseSize = 0
+
+	if c.Mode == ModeO5 {
+		if c.identity == nil {
+			return nil, errors.New("GenerateSPS21: pod identity not set in O5 mode (call SetIdentity)")
+		}
+		ct, err := encryptSPS21(c.conf, c.nonceState, c.identity.CertDER)
+		if err != nil {
+			return nil, fmt.Errorf("SPS2.1 encrypt: %w", err)
+		}
+		sp[sps21] = ct
+	} else {
+		responseSize := c.sps21Len - 1
+		if c.sps21Len == 0 {
+			responseSize = defaultSPS21Size
+		} else if responseSize < 0 {
+			responseSize = 0
+		}
+		sp[sps21] = bytes.Repeat([]byte{0x00}, responseSize)
 	}
-	sp[sps21] = bytes.Repeat([]byte{0x00}, responseSize)
 
 	msg := message.NewMessage(message.MessageTypePairing, c.podID, c.pdmID)
-	msg.Payload, err = buildStringByte([]string{sps21}, sp)
+	payload, err := buildStringByte([]string{sps21}, sp)
 	if err != nil {
 		return nil, err
 	}
-	log.Debugf("Generated SPS2.1 payload (%d bytes)", responseSize)
+	msg.Payload = payload
+	log.Debugf("Generated SPS2.1 (%d bytes)", len(sp[sps21]))
 	return msg, nil
 }
 
@@ -322,11 +402,12 @@ func (c *Pair) computePairData() error {
 		}
 		c.conf = conf
 		c.ltk = ltk
+		c.nonceState, err = newSPSNonceState(c.pdmNonce, c.podNonce)
+		if err != nil {
+			return err
+		}
 		log.Infof("O5 conf key %x", c.conf)
 		log.Infof("O5 LTK      %x", c.ltk)
-		// SPS2.1/SPS2 in O5 are AES-CCM payloads, not CMAC confirmation values;
-		// they are populated in dedicated handlers (Step 3). Skip the Dash
-		// CMAC chain.
 		return nil
 	}
 
