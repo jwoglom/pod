@@ -73,10 +73,26 @@ func (p *Pod) SetWebMessageHook(hook func([]byte)) {
 
 func (p *Pod) GetPodStateJson() ([]byte, error) {
 	p.mtx.Lock()
-	data, error := json.Marshal(p.state)
-	p.mtx.Unlock()
+	defer p.mtx.Unlock()
 
-	return data, error
+	// Marshal PODState into a generic map so we can layer in fields that are
+	// intrinsic to the running simulator instance (Mode, EffectiveDelivered,
+	// EffectiveReservoir) without persisting them to state.toml. Frontend
+	// uses Mode to switch between Dash and O5 panels and the Effective*
+	// fields to render bolus progress without re-implementing pulse math.
+	raw, err := json.Marshal(p.state)
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, err
+	}
+	m["Mode"] = p.pairMode.String()
+	delivered, reservoir := p.EffectiveDelivery()
+	m["EffectiveDelivered"] = delivered
+	m["EffectiveReservoir"] = reservoir
+	return json.Marshal(m)
 }
 
 func (p *Pod) notifyStateChange() {
@@ -105,6 +121,10 @@ func (p *Pod) handleAIDCommand(reqMsg *message.Message, plaintext []byte) {
 		return
 	}
 	log.Infof("pkg pod; AID %d %s.%s data=%q", cmd.Kind, cmd.Feature, cmd.Attribute, string(cmd.Data))
+
+	// Record completion for the frontend's setup-progress checklist. Each
+	// AID command logs its feature.attribute key in the order it arrived.
+	p.state.AIDCompleted = append(p.state.AIDCompleted, cmd.Feature+"."+cmd.Attribute)
 
 	respPayload := cmd.BuildResponse()
 	log.Infof("pkg pod; AID response: %q", string(respPayload))
@@ -138,6 +158,7 @@ func (p *Pod) handleAIDCommand(reqMsg *message.Message, plaintext []byte) {
 		p.state.NonceSeq++
 	}
 	p.state.Save()
+	p.notifyStateChange()
 }
 
 // ensurePodIdentity returns the pod's stable P-256 keypair + self-signed cert,
@@ -372,6 +393,7 @@ func (p *Pod) CommandLoop(pMsg PodMsgBody) {
 					log.Warnf("pkg pod; Type-4 signature verification FAILED (continuing)")
 				} else {
 					log.Infof("pkg pod; Type-4 signature verified")
+					p.state.Type4SignaturesVerified++
 				}
 			}
 		}
@@ -659,6 +681,7 @@ func (p *Pod) SetReservoir(newVal float32) {
 	p.state.Reservoir = uint16(newVal * 20)
 	p.state.Save()
 	p.mtx.Unlock()
+	p.notifyStateChange()
 }
 
 func (p *Pod) SetAlerts(newVal uint8) {
@@ -666,6 +689,7 @@ func (p *Pod) SetAlerts(newVal uint8) {
 	p.state.ActiveAlertSlots = newVal
 	p.state.Save()
 	p.mtx.Unlock()
+	p.notifyStateChange()
 }
 
 func (p *Pod) SetFault(newVal uint8) {
@@ -674,6 +698,7 @@ func (p *Pod) SetFault(newVal uint8) {
 	p.state.FaultTime = p.state.MinutesActive()
 	p.state.Save()
 	p.mtx.Unlock()
+	p.notifyStateChange()
 }
 
 func (p *Pod) SetActiveTime(newVal int) {
@@ -681,6 +706,7 @@ func (p *Pod) SetActiveTime(newVal int) {
 	p.state.ActivationTime = time.Now().Add(-time.Duration(newVal) * time.Minute)
 	p.state.Save()
 	p.mtx.Unlock()
+	p.notifyStateChange()
 }
 
 func (p *Pod) CrashNextCommand(beforeProcessing bool) {

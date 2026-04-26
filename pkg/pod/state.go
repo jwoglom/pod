@@ -63,6 +63,16 @@ type PODState struct {
 	BolusReservoirAtStart uint16    `toml:"bolus_reservoir_at_start"`
 	BolusDeliveredAtStart uint16    `toml:"bolus_delivered_at_start"`
 
+	// AIDCompleted is the ordered list of O5 AID Phase-1 commands the pod
+	// has serviced this activation. Format: "feature.attribute" e.g.
+	// "255.2", "3.2", "3.1". Reset on -fresh. Surfaced in the WS state for
+	// the frontend's setup-progress checklist.
+	AIDCompleted []string `toml:"aid_completed"`
+
+	// Type4SignaturesVerified is a running count of inbound Type-4 commands
+	// whose ECDSA signature passed verification. Reset on -fresh.
+	Type4SignaturesVerified uint32 `toml:"type4_sigs_verified"`
+
 	Filename string
 }
 
