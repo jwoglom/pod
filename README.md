@@ -1,6 +1,6 @@
 # pod
 
-Fake pod implementation
+Fake pod implementation. Originally a Dash simulator; now defaults to **Omnipod 5** mode.
 
 * The original 0pen-dash repository from which this was forked was removed by the owner.
 
@@ -64,6 +64,21 @@ FATA[####] pkg bluetooth; ** disconnect:
 ```
 
 Simple restore communication as stated above.
+
+## Omnipod 5 mode
+
+`-mode o5` (the default) targets the Omnipod 5 BLE protocol. The pieces that differ from Dash are documented in [DASH_VS_O5_PROTOCOL.md](DASH_VS_O5_PROTOCOL.md). Highlights:
+
+* P-256 ECDH for pairing, with a SHA-256 KDF over a length-prefixed buffer that mixes a fixed `FIRMWARE_ID` with the public keys and shared secret.
+* SPS2.1/SPS2 carry AES-CCM-encrypted X.509 certs (SPS2 also carries a 64-byte ECDSA signature). The simulator generates a self-signed P-256 cert + key on first activation and persists it in `state.toml`.
+* The 9 O5 AID setup commands (UTC, TDI, target BG profile, DIA, EGV, insulin history ×3, AID pod-status, plus alert/bolus follow-ups) run between AssignAddress and SetupPod using OmnipodKit's plain-ASCII key=value protocol.
+* `programBolus(prime/cannula-insert)` and `programBasal` arrive as Type-4 (`ENCRYPTED_SIGNED`) frames; the simulator verifies the controller's ECDSA signature using the PDM TLS pubkey extracted from SPS2.
+
+### Smoke-testing against OmnipodKit
+
+The intended test target is a build of `OmnipodKit` (sibling repo at `../OmnipodKit`) on a real iPhone driving pod-five over BLE. OmnipodKit's pod-side cert / signature checks are soft-fail and there is no chain validation, so no patching is required to accept the simulator's synthetic identity — OmnipodKit just needs its own `O5RegistrationData` populated.
+
+OmnipodKit features that are not on the simulator's compatibility path (and that the stock Insulet iOS app does use) include L2CAP CoC switchover post-pairing and pod-initiated unsolicited commands; pod-five doesn't emit either, which is fine because OmnipodKit doesn't expect them.
 
 # Original README.md
 
