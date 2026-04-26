@@ -67,7 +67,7 @@ func main() {
 	}()
 
 	log.Info("Starting API")
-	s := api.New(p)
+	s := api.New(p, webUIHandler())
 	s.Start()
 
 	time.Sleep(9999 * time.Second)

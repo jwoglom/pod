@@ -9,7 +9,11 @@
 /coverage
 
 # production
-/build
+/build/*
+# Keep the placeholder so the Go //go:embed in webui.go can compile even
+# without a fresh `npm run build`. Build artifacts (asset-manifest.json,
+# index.html, static/) remain ignored and get repopulated by `npm run build`.
+!/build/.placeholder
 
 # misc
 .DS_Store

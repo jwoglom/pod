@@ -1,0 +1,6 @@
+This directory holds the production build of the React UI that gets
+embedded into the pod-five Go binary via go:embed.
+
+Run `make frontend-build` (or `cd frontend && npm ci && npm run build`) to
+populate it. The placeholder file exists so that `go build` can compile the
+embed directive even when no UI build has been produced yet.

@@ -21,9 +21,16 @@ Requirements:
 
 Log on the pi and type the following commands, starting at {your_path}/pod:
 ```
-go build
+make pi
 sudo setcap 'cap_net_raw,cap_net_admin=eip' ./pod
 ```
+
+`make pi` builds the React UI under `frontend/` and embeds the resulting
+`frontend/build/` tree into the Go binary, so the simulator serves the web UI
+on `:8080/` alongside the WebSocket on `:8080/ws`. To skip the UI bundle (e.g.
+on a headless deployment), run `go build` directly — the embed has a
+placeholder file so the build still compiles, and `:8080/` will simply serve
+that placeholder.
 
 ## Run simulator on the pi
 

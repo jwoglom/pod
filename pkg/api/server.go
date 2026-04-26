@@ -13,14 +13,18 @@ import (
 type Server struct {
 	http.Handler
 
-	pod  *pod.Pod
-	conn *websocket.Conn
+	pod    *pod.Pod
+	conn   *websocket.Conn
+	uiRoot http.Handler
 }
 
-func New(pod *pod.Pod) *Server {
+// New constructs an API server. If uiRoot is non-nil it is mounted at "/"
+// to serve the embedded React UI; otherwise "/" returns a static info string.
+func New(pod *pod.Pod, uiRoot http.Handler) *Server {
 
 	ret := &Server{
-		pod: pod,
+		pod:    pod,
+		uiRoot: uiRoot,
 	}
 
 	return ret
@@ -47,9 +51,13 @@ func (s *Server) sendMessage(msg []byte) {
 }
 
 func (s *Server) setupRoutes() {
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "This is an API to the pod simulator intended to be used with a separate web client.")
-	})
+	if s.uiRoot != nil {
+		http.Handle("/", s.uiRoot)
+	} else {
+		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, "This is an API to the pod simulator intended to be used with a separate web client.")
+		})
+	}
 	http.Handle("/ws", s)
 }
 
