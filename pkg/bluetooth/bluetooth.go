@@ -340,8 +340,15 @@ func (b *Ble) ReadMessageWithTimeout(d time.Duration) (*message.Message, bool) {
 	}
 }
 
+// ShutdownConnection drops the BLE link to the current central and stops
+// the message loop so a subsequent StartAcceptingCommands can re-init the
+// pipeline cleanly. Without the StopMessageLoop call here, restarting the
+// loop later would fatal with "Messaging loop is already running".
 func (b *Ble) ShutdownConnection() {
-	(*b.central).Close()
+	if b.central != nil {
+		(*b.central).Close()
+	}
+	b.StopMessageLoop()
 }
 
 func (b *Ble) WriteMessage(message *message.Message) {

@@ -566,6 +566,11 @@ func (p *Pod) handleCommand(cmd command.Command) {
 		}
 		log.Debugf("pkg pod; ProgramInsulin: PodProgress = %d", p.state.PodProgress)
 
+		// Capture pre-transition progress to decide how fast a TableNum=2
+		// "bolus" runs: the pump primes and inserts the cannula at 1 second
+		// per pulse, but user-issued boluses run at 2 seconds per pulse.
+		preProgress := p.state.PodProgress
+
 		if p.state.PodProgress < response.PodProgressPriming {
 			// this must be the prime command
 			p.state.PodProgress = response.PodProgressPriming
@@ -592,14 +597,23 @@ func (p *Pod) handleCommand(cmd command.Command) {
 		// Programming bolus: record a snapshot at start so we can return
 		// pulse-by-pulse partial values in subsequent status responses, and
 		// settle Reservoir / Delivered when the bolus completes (or is
-		// cancelled). 2 seconds per pulse matches a real Omnipod 5.
+		// cancelled).
 		if c.TableNum == 2 {
 			p.settleBolusIfDone() // settle any prior, just in case
+			// Real-pod pulse cadence: prime and cannula-insert run at 1
+			// second per pulse; user boluses run at 2 seconds per pulse.
+			// The cannula-insert step transitions us from BasalInitialized
+			// → InsertingCannula, so we treat any TableNum=2 issued before
+			// InsertingCannula has been reached as a setup pulse.
+			pulsePeriod := 2 * time.Second
+			if preProgress < response.PodProgressInsertingCannula {
+				pulsePeriod = 1 * time.Second
+			}
 			p.state.BolusPulses = c.Pulses
 			p.state.BolusStartTime = time.Now()
 			p.state.BolusReservoirAtStart = p.state.Reservoir
 			p.state.BolusDeliveredAtStart = p.state.Delivered
-			p.state.BolusEnd = p.state.BolusStartTime.Add(time.Duration(c.Pulses) * time.Second * 2)
+			p.state.BolusEnd = p.state.BolusStartTime.Add(time.Duration(c.Pulses) * pulsePeriod)
 		}
 
 		if crashAfterProcessingCommand {
@@ -648,7 +662,7 @@ func (p *Pod) EffectiveDelivery() (delivered uint16, reservoir uint16) {
 	if p.state.BolusPulses == 0 {
 		return p.state.Delivered, p.state.Reservoir
 	}
-	partial := delivery.PartialPulses(p.state.BolusPulses, p.state.BolusStartTime, time.Now())
+	partial := delivery.PartialPulses(p.state.BolusPulses, p.state.BolusStartTime, p.state.BolusEnd, time.Now())
 	return p.state.BolusDeliveredAtStart + partial, p.state.BolusReservoirAtStart - partial
 }
 
@@ -673,7 +687,7 @@ func (p *Pod) settlePartialBolus() {
 	if p.state.BolusPulses == 0 {
 		return
 	}
-	partial := delivery.PartialPulses(p.state.BolusPulses, p.state.BolusStartTime, time.Now())
+	partial := delivery.PartialPulses(p.state.BolusPulses, p.state.BolusStartTime, p.state.BolusEnd, time.Now())
 	p.state.Delivered = p.state.BolusDeliveredAtStart + partial
 	p.state.Reservoir = p.state.BolusReservoirAtStart - partial
 	p.state.BolusPulses = 0
