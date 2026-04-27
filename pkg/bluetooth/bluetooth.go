@@ -32,8 +32,14 @@ var (
 type Ble struct {
 	dataInput  chan Packet
 	cmdInput   chan Packet
-	dataOutput chan Packet
-	cmdOutput  chan Packet
+	// cmdActivation receives pairing-state command bytes (HELLO 0x06,
+	// PAIR_STATUS 0x08, INCORRECT 0x09 — anything that isn't the RTS/CTS/
+	// SUCCESS/NACK fragmentation control set). ReadCmd() drains this so
+	// StartActivation gets first crack at the HELLO byte without racing
+	// the message loop's cmdInput consumer.
+	cmdActivation chan Packet
+	dataOutput    chan Packet
+	cmdOutput     chan Packet
 
 	messageInput  chan *message.Message
 	messageOutput chan *message.Message
@@ -71,6 +77,7 @@ func New(adapterID string, podId []byte) (*Ble, error) {
 	b := &Ble{
 		dataInput:     make(chan Packet, 5),
 		cmdInput:      make(chan Packet, 5),
+		cmdActivation: make(chan Packet, 5),
 		dataOutput:    make(chan Packet, 5),
 		cmdOutput:     make(chan Packet, 5),
 		messageInput:  make(chan *message.Message, 5),
@@ -169,7 +176,18 @@ func New(adapterID string, podId []byte) (*Ble, error) {
 					log.Tracef("pkg bluetooth; received CMD, %x -- %d", data, len(data))
 					ret := make([]byte, len(data))
 					copy(ret, data)
-					b.cmdInput <- Packet(ret)
+					// Multi-byte writes (e.g. HELLO = 06 01 04 + 4-byte
+					// controller ID) and any non-RTS/SUCCESS single-byte
+					// signal (HELLO, PAIR_STATUS, INCORRECT, …) belong on
+					// the activation queue. RTS / SUCCESS / NACK / FAIL
+					// stay on cmdInput where the message loop drains them
+					// for fragmentation handshake and ack handling.
+					if len(ret) > 1 || (ret[0] != CmdRTS[0] && ret[0] != CmdSuccess[0] &&
+						ret[0] != CmdNACK[0] && ret[0] != CmdFail[0]) {
+						b.cmdActivation <- Packet(ret)
+					} else {
+						b.cmdInput <- Packet(ret)
+					}
 					return 0
 				})
 
@@ -289,8 +307,13 @@ func (b *Ble) writeDataBuffer(buf *bytes.Buffer) error {
 	return b.WriteData(data)
 }
 
+// ReadCmd blocks until the next pairing-state command byte arrives on the
+// CMD characteristic — typically the OmnipodKit HELLO frame
+// (06 01 04 + 4-byte controller ID). RTS/CTS/SUCCESS/NACK/FAIL signal bytes
+// are not delivered here; they are consumed inline by the message loop's
+// readMessage path.
 func (b *Ble) ReadCmd() (Packet, error) {
-	packet := <-b.cmdInput
+	packet := <-b.cmdActivation
 	return packet, nil
 }
 
@@ -540,11 +563,16 @@ func (b *Ble) readMessage(cmd Packet) (*message.Message, error) {
 		return nil, nil
 	}
 
-	log.Trace("pkg bluetooth; Reading RTS")
 	if !bytes.Equal(CmdRTS[:1], cmd[:1]) {
-		log.Fatalf("pkg bluetooth; expected command: %x. received command: %x", CmdRTS, cmd[:1])
+		// HELLO / PAIR_STATUS / etc. are routed to cmdActivation by the
+		// CMD char write handler, so seeing one here means it slipped
+		// through the dispatcher (e.g. a multi-byte signal misclassified).
+		// Log and ignore rather than fatal — the activation-path consumer
+		// (StartActivation's ReadCmd) will pick it up if relevant.
+		log.Warnf("pkg bluetooth; readMessage saw unexpected cmd byte 0x%02x; ignoring", cmd[0])
+		return nil, nil
 	}
-	log.Trace("pkg bluetooth; Sending CTS")
+	log.Trace("pkg bluetooth; Reading RTS, sending CTS")
 
 	b.WriteCmd(CmdCTS)
 
