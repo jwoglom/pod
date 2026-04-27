@@ -2,15 +2,14 @@ package bluetooth
 
 import (
 	"bytes"
-	"encoding/binary"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"hash/crc32"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/avereha/pod/pkg/bluetooth/packet"
 	"github.com/avereha/pod/pkg/message"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/paypal/gatt"
@@ -398,28 +397,21 @@ func (b *Ble) expectCommand(expected Packet) {
 }
 
 func (b *Ble) writeMessageData(msg *message.Message) {
-	var buf bytes.Buffer
-	var index byte = 0
-
-	bytes, err := msg.Marshal()
+	payload, err := msg.Marshal()
 	if err != nil {
 		log.Fatalf("pkg bluetooth; could not marshal the message %s", err)
 	}
-	log.Tracef("pkg bluetooth; Sending message: %x", bytes)
+	log.Debugf("pkg bluetooth; sending message (%d bytes): %x", len(payload), payload)
 
-	sum := crc32.ChecksumIEEE(bytes)
+	packets := packet.Split(payload)
+	log.Debugf("pkg bluetooth; split into %d BLE fragment(s)", len(packets))
 
-	buf.WriteByte(index) // index
-	buf.WriteByte(0)     // fragments
-
-	buf.WriteByte(byte(sum >> 24))
-	buf.WriteByte(byte(sum >> 16))
-	buf.WriteByte(byte(sum >> 8))
-	buf.WriteByte(byte(sum))
-	buf.WriteByte((byte(len(bytes))))
-	buf.Write(bytes[:])
-	b.writeDataBuffer(&buf)
-	return
+	for i, pkt := range packets {
+		log.Tracef("pkg bluetooth; writing fragment %d/%d (%d bytes)", i+1, len(packets), len(pkt))
+		var buf bytes.Buffer
+		buf.Write(pkt)
+		b.writeDataBuffer(&buf)
+	}
 }
 
 func (b *Ble) writeMessage(msg *message.Message) {
@@ -507,54 +499,27 @@ func (b *Ble) readMessageData(data Packet) (*message.Message, error) {
 	return b.parsePackets(data)
 }
 
-func (b *Ble) parsePackets(data Packet) (*message.Message, error) {
-	var buf bytes.Buffer
-	var checksum []byte
-
-	fragments := int(data[1])
-	if fragments == 0 {
-		checksum = data[2:6]
-		buf.Write(data[7:])
-	} else {
-		buf.Write(data[2:])
-	}
-	expectedIndex := 1
-	for i := 1; i <= fragments; i++ {
-		data, _ := b.ReadData()
-		packetIndex := data[0]
-		if int(packetIndex) == expectedIndex {
-			if i == fragments {
-				len := data[1]
-				checksum = data[2:6]
-				payload := data[6 : len+6]
-				buf.Write(payload)
-			} else {
-				buf.Write(data[1:])
-			}
-		} else {
-			log.Warnf("pkg bluetooth; sending NACK, packet index is wrong")
-			buf.Write(data[:])
-			CmdNACK[1] = byte(expectedIndex)
-			b.WriteCmd(CmdNACK)
+func (b *Ble) parsePackets(first Packet) (*message.Message, error) {
+	log.Debugf("pkg bluetooth; reassembling, first fragment %d bytes: %x", len(first), first)
+	bytesOut, err := packet.Join(first, func() ([]byte, error) {
+		pkt, e := b.ReadData()
+		if e == nil {
+			log.Tracef("pkg bluetooth; got next fragment %d bytes: %x", len(pkt), []byte(pkt))
 		}
-		expectedIndex++
-	}
-	bytes := buf.Bytes()
-	sum := crc32.ChecksumIEEE(bytes)
-	if binary.BigEndian.Uint32(checksum) != sum {
-		log.Warnf("pkg bluetooth; checksum missmatch. checksum is: %x. want: %x", sum, checksum)
-		log.Warnf("pkg bluetooth; data: %s", hex.EncodeToString(bytes))
-
+		return pkt, e
+	})
+	if err != nil {
+		log.Warnf("pkg bluetooth; reassembly failed: %s", err)
 		b.WriteCmd(CmdFail)
-		return nil, errors.New("checksum missmatch")
+		return nil, err
 	}
+	log.Debugf("pkg bluetooth; reassembled %d-byte message", len(bytesOut))
 
 	b.WriteCmd(CmdSuccess)
 
-	msg, _err := message.Unmarshal(bytes)
-	log.Tracef("pkg bluetooth; Received message: %s", spew.Sdump(msg))
-
-	return msg, _err
+	msg, mErr := message.Unmarshal(bytesOut)
+	log.Tracef("pkg bluetooth; received message: %s", spew.Sdump(msg))
+	return msg, mErr
 }
 
 func (b *Ble) readMessage(cmd Packet) (*message.Message, error) {
