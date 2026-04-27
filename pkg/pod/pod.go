@@ -158,7 +158,9 @@ func (p *Pod) handleAIDCommand(reqMsg *message.Message, plaintext []byte) {
 		p.state.NonceSeq++
 	}
 	p.state.Save()
-	p.notifyStateChange()
+	// NOTE: do NOT call p.notifyStateChange() here. Caller holds p.mtx and
+	// notifyStateChange acquires it via GetPodStateJson — would deadlock.
+	// CommandLoop fires notifyStateChange after the matching p.mtx.Unlock().
 }
 
 // ensurePodIdentity returns the pod's stable P-256 keypair + self-signed cert,
@@ -411,6 +413,7 @@ func (p *Pod) CommandLoop(pMsg PodMsgBody) {
 		if aid.IsAIDPayload(decrypted.Payload) {
 			p.handleAIDCommand(msg, decrypted.Payload)
 			p.mtx.Unlock()
+			p.notifyStateChange()
 			continue
 		}
 
