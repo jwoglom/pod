@@ -21,9 +21,12 @@ Requirements:
 
 Log on the pi and type the following commands, starting at {your_path}/pod:
 ```
-make pi
-sudo setcap 'cap_net_raw,cap_net_admin=eip' ./pod
+make run    # builds the UI, builds linux/arm pod binary, runs setcap
 ```
+
+Equivalent to `make pi && make setcap`. The `setcap` step grants the
+binary the BLE capabilities it needs (`cap_net_raw,cap_net_admin=eip`) so
+it can be launched as a regular user with just `./pod` instead of `sudo`.
 
 `make pi` builds the React UI under `frontend/` and embeds the resulting
 `frontend/build/` tree into the Go binary, so the simulator serves the web UI
