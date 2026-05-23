@@ -61,7 +61,17 @@ type Pair struct {
 	nonceState *spsNonceState
 	identity   *PodIdentity
 	pdmCertDER []byte
+
+	// O5-only: raw P-256 public key (64 bytes X||Y) extracted from the
+	// PDM's TLS certificate during SPS2 parsing. Used post-pairing to
+	// verify ECDSA signatures on Type-4 commands (programBolus / programBasal).
+	pdmPublicKey []byte
 }
+
+// PDMPublicKey returns the 64-byte raw P-256 public key extracted from the
+// PDM's TLS certificate during SPS2, or nil if pairing has not yet completed
+// in O5 mode (or never reached SPS2 successfully).
+func (c *Pair) PDMPublicKey() []byte { return c.pdmPublicKey }
 
 // SetIdentity attaches a P-256 keypair + self-signed cert that the pod uses
 // to sign the SPS2 channel-binding transcript. Required in O5 mode before
@@ -196,6 +206,17 @@ func (c *Pair) ParseSPS2(msg *message.Message) error {
 		}
 		log.Infof("Decrypted PDM SPS2: %d-byte cert + 64-byte sig", len(certDER))
 		c.pdmCertDER = certDER
+
+		// Cache the PDM TLS pubkey for post-pairing Type-4 verification.
+		if pub, perr := extractP256PublicKey(certDER); perr == nil {
+			c.pdmPublicKey = make([]byte, 64)
+			x := pub.X.Bytes()
+			y := pub.Y.Bytes()
+			copy(c.pdmPublicKey[32-len(x):32], x)
+			copy(c.pdmPublicKey[64-len(y):64], y)
+		} else {
+			log.Warnf("Could not extract PDM pubkey from SPS2 cert: %v", perr)
+		}
 
 		ok, vErr := verifyTranscript(certDER, transcript, sig)
 		if vErr != nil {
