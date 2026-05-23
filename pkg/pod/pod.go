@@ -277,9 +277,9 @@ func (p *Pod) CommandLoop(pMsg PodMsgBody) {
 
 		if cmd.GetType() == command.SET_UNIQUE_ID {
 			// Set the unique ID
-			log.Tracef("SET_UNIQUE_ID cmd.GetPayload() %@", cmd.GetPayload())
+			log.Tracef("SET_UNIQUE_ID cmd.GetPayload() %x", cmd.GetPayload())
 			uniqueId := cmd.GetPayload()
-			log.Tracef("SET_UNIQUE_ID uniqueId %@", uniqueId)
+			log.Tracef("SET_UNIQUE_ID uniqueId %x", uniqueId)
 			p.ble.RefreshAdvertisingWithSpecifiedId(uniqueId)
 			p.state.Id = uniqueId
 		}
