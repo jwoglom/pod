@@ -7,12 +7,18 @@ import (
 	toml "github.com/pelletier/go-toml"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/avereha/pod/pkg/pair"
 	"github.com/avereha/pod/pkg/response"
 )
 
 type PODState struct {
 	LTK       []byte `toml:"ltk"`
 	EapAkaSeq uint64 `toml:"eap_aka_seq"`
+
+	// Mode is the active pairing mode (Dash or O5) that selects which
+	// response variants the simulator produces. Persisted so the bytes the
+	// pod returns to the controller stay consistent across restarts.
+	Mode pair.Mode `toml:"mode"`
 
 	Id []byte `toml:"id"` // 4 byte
 

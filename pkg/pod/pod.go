@@ -57,6 +57,15 @@ func New(ble *bluetooth.Ble, stateFile string, freshState bool, pairMode pair.Mo
 		}
 	}
 
+	// Mirror the active pair mode onto persisted state so response-layer
+	// code (which doesn't see the Pod struct) can pick the right Dash/O5
+	// byte stream. Always overwrite: the -mode flag is the source of
+	// truth for the current run.
+	state.Mode = pairMode
+	if err := state.Save(); err != nil {
+		log.Warnf("pkg pod; could not persist pair mode to state: %s", err)
+	}
+
 	ret := &Pod{
 		ble:      ble,
 		state:    state,
@@ -396,7 +405,14 @@ func (p *Pod) CommandLoop(pMsg PodMsgBody) {
 
 		var rsp response.Response
 		if cmd.IsResponseHardcoded() {
-			rsp, err = cmd.GetResponse()
+			// Prefer the mode-aware variant when the command implements
+			// it (currently SetUniqueID and GetVersion). Other commands
+			// keep the original single-byte-stream GetResponse path.
+			if mr, ok := cmd.(command.ResponseForMode); ok {
+				rsp, err = mr.GetResponseForMode(p.state.Mode)
+			} else {
+				rsp, err = cmd.GetResponse()
+			}
 			if err != nil {
 				log.Fatalf("pkg pod; could not get command response: %s", err)
 			}
