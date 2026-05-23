@@ -89,6 +89,25 @@ func (p *Pod) notifyStateChange() {
 	}
 }
 
+// ensurePodIdentity returns the pod's stable P-256 keypair + self-signed cert,
+// generating and persisting it on first use. Each pod simulator instance has
+// a stable cryptographic identity once activated, mirroring real pods.
+func (p *Pod) ensurePodIdentity() (*pair.PodIdentity, error) {
+	if len(p.state.O5PrivateKey) > 0 && len(p.state.O5CertDER) > 0 {
+		return pair.LoadPodIdentity(p.state.O5PrivateKey, p.state.O5CertDER)
+	}
+	id, err := pair.NewPodIdentity()
+	if err != nil {
+		return nil, err
+	}
+	p.state.O5PrivateKey = id.PrivateScalar()
+	p.state.O5CertDER = id.CertDER
+	if err := p.state.Save(); err != nil {
+		log.Warnf("pkg pod; could not persist pod identity: %s", err)
+	}
+	return id, nil
+}
+
 func (p *Pod) StartAcceptingCommands() {
 	log.Infof("pkg pod; Listening for commands")
 	firstCmd, _ := p.ble.ReadCmd()
@@ -105,30 +124,53 @@ func (p *Pod) StartAcceptingCommands() {
 
 func (p *Pod) StartActivation() {
 
-	pair := &pair.Pair{Mode: p.pairMode}
+	pairCtx := &pair.Pair{Mode: p.pairMode}
+
+	if pairCtx.IsO5() {
+		identity, err := p.ensurePodIdentity()
+		if err != nil {
+			log.Fatalf("pkg pod; could not load/create pod identity: %s", err)
+		}
+		pairCtx.SetIdentity(identity)
+	}
+
 	msg, _ := p.ble.ReadMessage()
-	if err := pair.ParseSP1SP2(msg); err != nil {
+	if err := pairCtx.ParseSP1SP2(msg); err != nil {
 		log.Fatalf("pkg pod; error parsing SP1SP2 %s", err)
 	}
 	// read PDM public key and nonce
 	msg, _ = p.ble.ReadMessage()
-	if err := pair.ParseSPS1(msg); err != nil {
+	if err := pairCtx.ParseSPS1(msg); err != nil {
 		log.Fatalf("pkg pod; error parsing SPS1 %s", err)
 	}
 
-	msg, err := pair.GenerateSPS1()
+	msg, err := pairCtx.GenerateSPS1()
 	if err != nil {
 		log.Fatal(err)
 	}
 	// send POD public key and nonce
 	p.ble.WriteMessage(msg)
 
+	if pairCtx.IsO5() {
+		// O5 inserts SPS2.1 (intermediate-CA cert exchange) between SPS1 and SPS2.
+		msg, _ = p.ble.ReadMessage()
+		if err := pairCtx.ParseSPS21(msg); err != nil {
+			log.Fatalf("pkg pod; error parsing SPS2.1 %s", err)
+		}
+
+		msg, err = pairCtx.GenerateSPS21()
+		if err != nil {
+			log.Fatal(err)
+		}
+		p.ble.WriteMessage(msg)
+	}
+
 	// read PDM conf value
 	msg, _ = p.ble.ReadMessage()
-	pair.ParseSPS2(msg)
+	pairCtx.ParseSPS2(msg)
 
 	// send POD conf value
-	msg, err = pair.GenerateSPS2()
+	msg, err = pairCtx.GenerateSPS2()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -136,19 +178,19 @@ func (p *Pod) StartActivation() {
 
 	// receive SP0GP0 constant from PDM
 	msg, _ = p.ble.ReadMessage()
-	err = pair.ParseSP0GP0(msg)
+	err = pairCtx.ParseSP0GP0(msg)
 	if err != nil {
 		log.Fatalf("pkg pod; could not parse SP0GP0: %s", err)
 	}
 
 	// send P0 constant
-	msg, err = pair.GenerateP0()
+	msg, err = pairCtx.GenerateP0()
 	if err != nil {
 		log.Fatal(err)
 	}
 	p.ble.WriteMessage(msg)
 
-	p.state.LTK, err = pair.LTK()
+	p.state.LTK, err = pairCtx.LTK()
 	if err != nil {
 		log.Fatalf("pkg pod; could not get LTK %s", err)
 	}

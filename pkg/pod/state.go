@@ -25,6 +25,14 @@ type PODState struct {
 	NoncePrefix []byte `toml:"nonce_prefix"`
 	CK          []byte `toml:"ck"`
 
+	// O5 pairing identity: a P-256 ECDSA private key (raw 32-byte scalar)
+	// and a self-signed DER X.509 certificate wrapping the matching public
+	// key. Used to sign the SPS2 channel-binding transcript and to satisfy
+	// OmnipodKit's `extractP256PublicKey(fromDERCert:)`. Generated once on
+	// first activation and reused thereafter.
+	O5PrivateKey []byte `toml:"o5_private_key"`
+	O5CertDER    []byte `toml:"o5_cert_der"`
+
 	PodProgress    response.PodProgress
 	ActivationTime time.Time `toml:"activation_time"`
 
