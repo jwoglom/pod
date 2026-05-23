@@ -375,6 +375,7 @@ func (p *Pod) CommandLoop(pMsg PodMsgBody) {
 		if aid.IsAIDPayload(decrypted.Payload) {
 			p.handleAIDCommand(msg, decrypted.Payload)
 			p.mtx.Unlock()
+			p.notifyStateChange()
 			continue
 		}
 

@@ -38,10 +38,6 @@ type Ble struct {
 	// SUCCESS/NACK fragmentation control set). ReadCmd() drains this so
 	// StartActivation gets first crack at the HELLO byte without racing
 	// the message loop's cmdInput consumer.
-	//
-	// NOTE (Commit 3b): the channel and the ReadCmd() reader are wired
-	// here, but the CMD-char write handler does NOT yet route into it.
-	// The dispatcher fix lands in a later commit (76fd556 / Commit 9).
 	cmdActivation chan Packet
 	dataOutput    chan Packet
 	cmdOutput     chan Packet
@@ -181,12 +177,18 @@ func New(adapterID string, podId []byte) (*Ble, error) {
 					log.Tracef("received CMD,  %x", data)
 					ret := make([]byte, len(data))
 					copy(ret, data)
-					// NOTE (Commit 3b): the HELLO-vs-RTS dispatcher (which
-					// routes activation bytes to cmdActivation) lands with
-					// Commit 9 (76fd556). For now every CMD write goes to
-					// cmdInput exactly like origin/main, preserving the
-					// existing pairing flow.
-					b.cmdInput <- Packet(ret)
+					// Multi-byte writes (e.g. HELLO = 06 01 04 + 4-byte
+					// controller ID) and any non-RTS/SUCCESS single-byte
+					// signal (HELLO, PAIR_STATUS, INCORRECT, …) belong on
+					// the activation queue. RTS / SUCCESS / NACK / FAIL
+					// stay on cmdInput where the message loop drains them
+					// for fragmentation handshake and ack handling.
+					if len(ret) > 1 || (ret[0] != CmdRTS[0] && ret[0] != CmdSuccess[0] &&
+						ret[0] != CmdNACK[0] && ret[0] != CmdFail[0]) {
+						b.cmdActivation <- Packet(ret)
+					} else {
+						b.cmdInput <- Packet(ret)
+					}
 					return 0
 				})
 
@@ -315,13 +317,8 @@ func (b *Ble) writeDataBuffer(buf *bytes.Buffer) error {
 // (06 01 04 + 4-byte controller ID). RTS/CTS/SUCCESS/NACK/FAIL signal bytes
 // are not delivered here; they are consumed inline by the message loop's
 // readMessage path.
-//
-// NOTE (Commit 3b): cmdActivation exists on the struct but its dispatcher
-// is deferred to Commit 9 (76fd556). Until then, ReadCmd continues to read
-// from cmdInput exactly like main, so the simulator's pairing path remains
-// functional through Commits 4-8.
 func (b *Ble) ReadCmd() (Packet, error) {
-	packet := <-b.cmdInput
+	packet := <-b.cmdActivation
 	return packet, nil
 }
 
@@ -557,20 +554,28 @@ func (b *Ble) parsePackets(first Packet) (*message.Message, error) {
 	return msg, mErr
 }
 
-// readMessage is the legacy RTS-driven read path retained verbatim from
-// origin/main. With the new loop wiring (dataInput is consumed directly
-// by readMessageData) this function only runs when an RTS arrives on the
-// CMD characteristic. The graceful non-RTS fallback / HELLO handling
-// added by five's 76fd556 is deferred to Commit 9.
+// readMessage is the legacy RTS-driven read path retained from origin/main.
+// With the new loop wiring (dataInput is consumed directly by
+// readMessageData) this function only runs when an RTS arrives on the CMD
+// characteristic. HELLO / PAIR_STATUS / INCORRECT and other multi-byte
+// activation bytes are routed to cmdActivation by the CMD-char write
+// handler, so they should never reach here; if one does (e.g. a
+// misclassified future OmnipodKit signal), warn and ignore rather than
+// fatal so the loop survives.
 func (b *Ble) readMessage(cmd Packet) (*message.Message, error) {
 	var buf bytes.Buffer
 	var checksum []byte
 
-	log.Trace("pkg bluetooth; Reading RTS")
 	if !bytes.Equal(CmdRTS[:1], cmd[:1]) {
-		log.Fatalf("pkg bluetooth; expected command: %x. received command: %x", CmdRTS, cmd)
+		// HELLO / PAIR_STATUS / etc. are routed to cmdActivation by the
+		// CMD char write handler, so seeing one here means it slipped
+		// through the dispatcher (e.g. a multi-byte signal misclassified).
+		// Log and ignore rather than fatal — the activation-path consumer
+		// (StartActivation's ReadCmd) will pick it up if relevant.
+		log.Warnf("pkg bluetooth; readMessage saw unexpected cmd byte 0x%02x; ignoring", cmd[0])
+		return nil, nil
 	}
-	log.Trace("pkg bluetooth; Sending CTS")
+	log.Trace("pkg bluetooth; Reading RTS, sending CTS")
 
 	b.WriteCmd(CmdCTS)
 
