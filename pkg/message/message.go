@@ -14,7 +14,8 @@ const (
 	MessageTypeEncrypted
 	MessageTypeSessionEstablishment
 	MessageTypePairing
-	MagicPattern = "TW"
+	MessageTypeEncryptedSigned MessageType = 4
+	MagicPattern                           = "TW"
 )
 
 // Message is one CTwiPacket
@@ -151,7 +152,11 @@ func Unmarshal(data []byte) (*Message, error) {
 	}
 	ret.SequenceNumber = data[4]
 	ret.AckNumber = data[5]
-	var n = data[6]<<3 | data[7]>>5
+	// 11-bit length: high 8 bits in data[6], low 3 bits in data[7][7:5].
+	// Cast to uint16 BEFORE shifting — `data[6]<<3` is a uint8 op in Go and
+	// silently truncates the high bits, so any payload >255 (e.g. SPS2.1 at
+	// 651) decoded as a wraparound value (0x51<<3 → 0x88, not 0x288).
+	n := uint16(data[6])<<3 | uint16(data[7])>>5
 	if int(n) > len(data)-16 {
 		spew.Dump(ret)
 		return nil, fmt.Errorf("received length is too big in %x. Length:%d . remaining: %d", data, n, len(data)-16)
@@ -159,10 +164,10 @@ func Unmarshal(data []byte) (*Message, error) {
 	ret.Source = data[8:12]
 	ret.Destination = data[12:16]
 	if ret.Type == MessageTypeEncrypted {
-		ret.Payload = data[16 : 16+n+8]
+		ret.Payload = data[16 : 16+int(n)+8]
 		ret.EncryptedPayload = true
 	} else {
-		ret.Payload = data[16 : 16+n]
+		ret.Payload = data[16 : 16+int(n)]
 	}
 	return ret, nil
 }
