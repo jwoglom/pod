@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/avereha/pod/pkg/bluetooth/packet"
 	"github.com/avereha/pod/pkg/message"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/paypal/gatt"
@@ -29,10 +31,20 @@ var (
 )
 
 type Ble struct {
-	dataInput  chan Packet
-	cmdInput   chan Packet
-	dataOutput chan Packet
-	cmdOutput  chan Packet
+	dataInput chan Packet
+	cmdInput  chan Packet
+	// cmdActivation receives pairing-state command bytes (HELLO 0x06,
+	// PAIR_STATUS 0x08, INCORRECT 0x09 — anything that isn't the RTS/CTS/
+	// SUCCESS/NACK fragmentation control set). ReadCmd() drains this so
+	// StartActivation gets first crack at the HELLO byte without racing
+	// the message loop's cmdInput consumer.
+	//
+	// NOTE (Commit 3b): the channel and the ReadCmd() reader are wired
+	// here, but the CMD-char write handler does NOT yet route into it.
+	// The dispatcher fix lands in a later commit (76fd556 / Commit 9).
+	cmdActivation chan Packet
+	dataOutput    chan Packet
+	cmdOutput     chan Packet
 
 	messageInput  chan *message.Message
 	messageOutput chan *message.Message
@@ -46,6 +58,9 @@ type Ble struct {
 
 	dataNotifier    gatt.Notifier
 	dataNotifierMtx sync.Mutex
+
+	heartbeatNotifier    gatt.Notifier
+	heartbeatNotifierMtx sync.Mutex
 }
 
 var DefaultServerOptions = []gatt.Option{
@@ -67,6 +82,7 @@ func New(adapterID string, podId []byte) (*Ble, error) {
 	b := &Ble{
 		dataInput:     make(chan Packet, 5),
 		cmdInput:      make(chan Packet, 5),
+		cmdActivation: make(chan Packet, 5),
 		dataOutput:    make(chan Packet, 5),
 		cmdOutput:     make(chan Packet, 5),
 		messageInput:  make(chan *message.Message, 5),
@@ -119,14 +135,43 @@ func New(adapterID string, podId []byte) (*Ble, error) {
 		}
 	}()
 
+	// Heartbeat emitter: once a phone subscribes to the heartbeat
+	// characteristic, push a one-byte notification every 10s. Real O5 pods
+	// use this as a connection keep-alive.
+	go func() {
+		t := time.NewTicker(10 * time.Second)
+		defer t.Stop()
+		for range t.C {
+			b.heartbeatNotifierMtx.Lock()
+			n := b.heartbeatNotifier
+			b.heartbeatNotifierMtx.Unlock()
+			if n == nil || n.Done() {
+				continue
+			}
+			if _, err := n.Write([]byte{0x00}); err != nil {
+				log.Tracef("pkg bluetooth; heartbeat write error: %s", err)
+			}
+		}
+	}()
+
 	// A mandatory handler for monitoring device state.
 	onStateChanged := func(d gatt.Device, s gatt.State) {
 		fmt.Printf("state: %s\n", s)
 		switch s {
 		case gatt.StatePoweredOn:
-			var serviceUUID = gatt.MustParseUUID("1a7e-4024-e3ed-4464-8b7e-751e03d0dc5f")
-			var cmdCharUUID = gatt.MustParseUUID("1a7e-2441-e3ed-4464-8b7e-751e03d0dc5f")
-			var dataCharUUID = gatt.MustParseUUID("1a7e-2442-e3ed-4464-8b7e-751e03d0dc5f")
+			// Main pod GATT service (Omnipod 5; same primary UUID as Dash).
+			// Source: OmnipodKit BluetoothServices.swift / BlePodProfile.swift.
+			var serviceUUID = gatt.MustParseUUID("1A7E4024-E3ED-4464-8B7E-751E03D0DC5F")
+			var cmdCharUUID = gatt.MustParseUUID("1A7E2441-E3ED-4464-8B7E-751E03D0DC5F")
+			var dataCharUUID = gatt.MustParseUUID("1A7E2443-E3ED-4464-8B7E-751E03D0DC5F")
+
+			// Omnipod 5 heartbeat service used for keep-alive.
+			// The pod GATT service UUID is 7DED7A6C... and its single
+			// characteristic is 7DED7A6D... (notify). The ECF301E2... UUID
+			// below is what OmnipodKit scans for in the advertisement, not a
+			// GATT service exposed on the pod.
+			var heartbeatServiceUUID = gatt.MustParseUUID("7DED7A6C-CA72-46A7-A3A2-6061F6FDCAEB")
+			var heartbeatCharUUID = gatt.MustParseUUID("7DED7A6D-CA72-46A7-A3A2-6061F6FDCAEB")
 
 			s := gatt.NewService(serviceUUID)
 
@@ -136,6 +181,11 @@ func New(adapterID string, podId []byte) (*Ble, error) {
 					log.Tracef("received CMD,  %x", data)
 					ret := make([]byte, len(data))
 					copy(ret, data)
+					// NOTE (Commit 3b): the HELLO-vs-RTS dispatcher (which
+					// routes activation bytes to cmdActivation) lands with
+					// Commit 9 (76fd556). For now every CMD write goes to
+					// cmdInput exactly like origin/main, preserving the
+					// existing pairing flow.
 					b.cmdInput <- Packet(ret)
 					return 0
 				})
@@ -167,34 +217,47 @@ func New(adapterID string, podId []byte) (*Ble, error) {
 					return 0
 				})
 
-			err = d.AddService(s)
+			h := gatt.NewService(heartbeatServiceUUID)
+			hbCharacteristic := h.AddCharacteristic(heartbeatCharUUID)
+			hbCharacteristic.HandleNotifyFunc(
+				func(r gatt.Request, n gatt.Notifier) {
+					b.heartbeatNotifierMtx.Lock()
+					b.heartbeatNotifier = n
+					b.heartbeatNotifierMtx.Unlock()
+					log.Infof("pkg bluetooth; handling heartbeat notifications on new connection from: %s", r.Central.ID())
+				})
+
+			err = d.SetServices([]*gatt.Service{s, h})
 			if err != nil {
 				log.Fatalf("pkg bluetooth; could not add service: %s", err)
 			}
 
-			podIdServiceOne := gatt.UUID16(0xffff)
-			podIdServiceTwo := gatt.UUID16(0xfffe)
-			if podId != nil {
-				podIdServiceOne = gatt.UUID16(binary.BigEndian.Uint16(podId[0:2]))
-				podIdServiceTwo = gatt.UUID16(binary.BigEndian.Uint16(podId[2:4]))
+			podIdArray, err := hex.DecodeString("fffffffe")
+			if err != nil {
+				log.Fatalf("pkg bluetooth; could not parse default address: %s", err)
 			}
 
-			// Advertise device name and service's UUIDs.
-			err = d.AdvertiseNameAndServices(" :: Fake POD ::", []gatt.UUID{
-				gatt.UUID16(0x4024),
+			if podId != nil {
+				podIdArray = podId
+			}
 
-				gatt.UUID16(0x2470),
-				gatt.UUID16(0x000a),
-
-				podIdServiceOne,
-				podIdServiceTwo,
-
-				// these 4 are copied from lotNo and lotSeq from fixed string in versionresponse.go
-				gatt.UUID16(0x0814),
-				gatt.UUID16(0x6DB1),
-				gatt.UUID16(0x0006),
-				gatt.UUID16(0xE451),
-			})
+			// CE1F923D-C539-48EA-7300-0AFFFFFFFE00 unpaired, or
+			// CE1F923D-C539-48EA-7300-0A<pdmId>00 once paired. The
+			// ECF301E2... UUID is OmnipodKit's "advertisement" identifier
+			// for the O5 heartbeat service and is co-advertised so the
+			// scanner can find it during discovery (BluetoothServices.swift).
+			//
+			// NOTE: the vendored paypal/gatt in this tree does not expose
+			// AdvertiseNameServicesMfgData; the manufacturer-data payload
+			// (60030001000000) cannot be advertised without patching the
+			// vendor library. Fall back to AdvertiseNameAndServices for now.
+			err = d.AdvertiseNameAndServices(
+				"AP "+strings.ToUpper(hex.EncodeToString(podIdArray))+" 0A95B6110002761B",
+				[]gatt.UUID{
+					gatt.MustParseUUID("CE1F923D-C539-48EA-7300-0A" + hex.EncodeToString(podIdArray) + "00"),
+					gatt.MustParseUUID("ECF301E2-674B-4474-94D0-364F3AA653E6"),
+				},
+			)
 			if err != nil {
 				log.Fatalf("pkg bluetooth; could not advertise: %s", err)
 			}
@@ -211,25 +274,18 @@ func New(adapterID string, podId []byte) (*Ble, error) {
 func (b *Ble) RefreshAdvertisingWithSpecifiedId(id []byte) error { // 4 bytes, first 2 usually empty
 	log.Debugf("RefreshAdvertisingWithSpecifiedId %x", id)
 	// Looking at the paypal/gatt source code, we don't need to call StopAdvertising,
-	// but just call AdvertiseNameAndServices and it should update
-
-	log.Tracef("podIdServiceOne %v", gatt.UUID16(binary.BigEndian.Uint16(id[0:2])))
-	log.Tracef("podIdServiceTwo %v", gatt.UUID16(binary.BigEndian.Uint16(id[2:4])))
-	err := (*b.device).AdvertiseNameAndServices(" :: Fake POD ::", []gatt.UUID{
-		gatt.UUID16(0x4024),
-
-		gatt.UUID16(0x2470),
-		gatt.UUID16(0x000a),
-
-		gatt.UUID16(binary.BigEndian.Uint16(id[0:2])),
-		gatt.UUID16(binary.BigEndian.Uint16(id[2:4])),
-
-		// these 4 are copied from lotNo and lotSeq from fixed string in versionresponse.go
-		gatt.UUID16(0x0814),
-		gatt.UUID16(0x6DB1),
-		gatt.UUID16(0x0006),
-		gatt.UUID16(0xE451),
-	})
+	// but just call AdvertiseNameAndServices and it should update.
+	//
+	// As with the initial advertise in New(), the vendored gatt does not
+	// support manufacturer-data advertising, so the 60030001000000 payload
+	// is omitted here as well.
+	err := (*b.device).AdvertiseNameAndServices(
+		"AP "+strings.ToUpper(hex.EncodeToString(id))+" 0A95B6110002761B",
+		[]gatt.UUID{
+			gatt.MustParseUUID("CE1F923D-C539-48EA-7300-0A" + hex.EncodeToString(id) + "00"),
+			gatt.MustParseUUID("ECF301E2-674B-4474-94D0-364F3AA653E6"),
+		},
+	)
 	if err != nil {
 		log.Infof("pkg bluetooth; could not re-advertise: %s", err)
 	}
@@ -254,6 +310,16 @@ func (b *Ble) writeDataBuffer(buf *bytes.Buffer) error {
 	return b.WriteData(data)
 }
 
+// ReadCmd blocks until the next pairing-state command byte arrives on the
+// CMD characteristic — typically the OmnipodKit HELLO frame
+// (06 01 04 + 4-byte controller ID). RTS/CTS/SUCCESS/NACK/FAIL signal bytes
+// are not delivered here; they are consumed inline by the message loop's
+// readMessage path.
+//
+// NOTE (Commit 3b): cmdActivation exists on the struct but its dispatcher
+// is deferred to Commit 9 (76fd556). Until then, ReadCmd continues to read
+// from cmdInput exactly like main, so the simulator's pairing path remains
+// functional through Commits 4-8.
 func (b *Ble) ReadCmd() (Packet, error) {
 	packet := <-b.cmdInput
 	return packet, nil
@@ -283,8 +349,15 @@ func (b *Ble) ReadMessageWithTimeout(d time.Duration) (*message.Message, bool) {
 	}
 }
 
+// ShutdownConnection drops the BLE link to the current central and stops
+// the message loop so a subsequent StartAcceptingCommands can re-init the
+// pipeline cleanly. Without the StopMessageLoop call here, restarting the
+// loop later would fatal with "Messaging loop is already running".
 func (b *Ble) ShutdownConnection() {
-	(*b.central).Close()
+	if b.central != nil {
+		(*b.central).Close()
+	}
+	b.StopMessageLoop()
 }
 
 func (b *Ble) WriteMessage(message *message.Message) {
@@ -297,13 +370,21 @@ func (b *Ble) loop(stop chan bool) {
 		case <-stop:
 			return
 		case msg := <-b.messageOutput:
-			b.writeMessage(msg)
+			b.writeMessageData(msg)
+		case data := <-b.dataInput:
+			msg, err := b.readMessageData(data)
+			if err != nil {
+				log.Fatalf("pkg bluetooth; error reading message: %s", err)
+			}
+			b.messageInput <- msg
 		case cmd := <-b.cmdInput:
 			msg, err := b.readMessage(cmd)
 			if err != nil {
 				log.Fatalf("pkg bluetooth; error reading message: %s", err)
 			}
-			b.messageInput <- msg
+			if msg != nil {
+				b.messageInput <- msg
+			}
 		}
 	}
 }
@@ -331,6 +412,38 @@ func (b *Ble) expectCommand(expected Packet) {
 	}
 }
 
+// writeMessageData fragments msg through pkg/bluetooth/packet (OmnipodKit's
+// authoritative split format) and pushes each fragment to the DATA
+// characteristic. This is the path used by the live loop for all message
+// writes — including the large get-status-type-1/3/5 responses preserved
+// from main commit 79be48c. The packet subpackage's Split tests cover
+// SPS2.1- and SPS2-sized payloads, so the large-message handling that
+// 79be48c added to the old hand-rolled byte fragmentation in writeMessage
+// is supplied here by the tested Split implementation.
+func (b *Ble) writeMessageData(msg *message.Message) {
+	payload, err := msg.Marshal()
+	if err != nil {
+		log.Fatalf("pkg bluetooth; could not marshal the message %s", err)
+	}
+	log.Debugf("pkg bluetooth; sending message (%d bytes): %x", len(payload), payload)
+
+	packets := packet.Split(payload)
+	log.Debugf("pkg bluetooth; split into %d BLE fragment(s)", len(packets))
+
+	for i, pkt := range packets {
+		log.Tracef("pkg bluetooth; writing fragment %d/%d (%d bytes)", i+1, len(packets), len(pkt))
+		var buf bytes.Buffer
+		buf.Write(pkt)
+		b.writeDataBuffer(&buf)
+	}
+}
+
+// writeMessage is the legacy Dash-shaped fragmenter retained from origin/main.
+// It is no longer invoked by the message loop (writeMessageData is used
+// instead), but is kept here for any future caller that wants the old
+// RTS/CTS/SUCCESS handshake. The byte→int index conversion from commit
+// 79be48c is preserved verbatim so the type 1/3/5 / large-message overflow
+// fix still applies if anything calls this.
 func (b *Ble) writeMessage(msg *message.Message) {
 	var buf bytes.Buffer
 	var index = 0
@@ -345,7 +458,7 @@ func (b *Ble) writeMessage(msg *message.Message) {
 	sum := crc32.ChecksumIEEE(bytes)
 	if len(bytes) <= 18 {
 		buf.WriteByte(byte(index))
-		buf.WriteByte(0)     // fragments
+		buf.WriteByte(0) // fragments
 
 		buf.WriteByte(byte(sum >> 24))
 		buf.WriteByte(byte(sum >> 16))
@@ -412,6 +525,43 @@ func (b *Ble) writeMessage(msg *message.Message) {
 	b.expectCommand(CmdSuccess)
 }
 
+// readMessageData reassembles fragments arriving on the DATA characteristic
+// using pkg/bluetooth/packet.Join. This replaces the old hand-rolled
+// fragmentation reader; the OmnipodKit-aligned reassembler bounds each
+// fragment read to its own declared length so smaller-than-244 MTUs still
+// work, which subsumes the large-message read robustness work in 79be48c.
+func (b *Ble) readMessageData(data Packet) (*message.Message, error) {
+	return b.parsePackets(data)
+}
+
+func (b *Ble) parsePackets(first Packet) (*message.Message, error) {
+	log.Debugf("pkg bluetooth; reassembling, first fragment %d bytes: %x", len(first), first)
+	bytesOut, err := packet.Join(first, func() ([]byte, error) {
+		pkt, e := b.ReadData()
+		if e == nil {
+			log.Tracef("pkg bluetooth; got next fragment %d bytes: %x", len(pkt), []byte(pkt))
+		}
+		return pkt, e
+	})
+	if err != nil {
+		log.Warnf("pkg bluetooth; reassembly failed: %s", err)
+		b.WriteCmd(CmdFail)
+		return nil, err
+	}
+	log.Debugf("pkg bluetooth; reassembled %d-byte message", len(bytesOut))
+
+	b.WriteCmd(CmdSuccess)
+
+	msg, mErr := message.Unmarshal(bytesOut)
+	log.Tracef("pkg bluetooth; received message: %s", spew.Sdump(msg))
+	return msg, mErr
+}
+
+// readMessage is the legacy RTS-driven read path retained verbatim from
+// origin/main. With the new loop wiring (dataInput is consumed directly
+// by readMessageData) this function only runs when an RTS arrives on the
+// CMD characteristic. The graceful non-RTS fallback / HELLO handling
+// added by five's 76fd556 is deferred to Commit 9.
 func (b *Ble) readMessage(cmd Packet) (*message.Message, error) {
 	var buf bytes.Buffer
 	var checksum []byte
