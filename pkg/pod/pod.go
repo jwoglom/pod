@@ -31,6 +31,7 @@ type PodMsgBody struct {
 type Pod struct {
 	ble            *bluetooth.Ble
 	state          *PODState
+	pairMode       pair.Mode
 	mtx            sync.Mutex
 	webMessageHook func([]byte)
 }
@@ -39,7 +40,7 @@ type Pod struct {
 var crashBeforeProcessingCommand bool
 var crashAfterProcessingCommand bool
 
-func New(ble *bluetooth.Ble, stateFile string, freshState bool) *Pod {
+func New(ble *bluetooth.Ble, stateFile string, freshState bool, pairMode pair.Mode) *Pod {
 	var err error
 
 	state := &PODState{
@@ -55,8 +56,9 @@ func New(ble *bluetooth.Ble, stateFile string, freshState bool) *Pod {
 	}
 
 	ret := &Pod{
-		ble:   ble,
-		state: state,
+		ble:      ble,
+		state:    state,
+		pairMode: pairMode,
 	}
 
 	return ret
@@ -103,7 +105,7 @@ func (p *Pod) StartAcceptingCommands() {
 
 func (p *Pod) StartActivation() {
 
-	pair := &pair.Pair{}
+	pair := &pair.Pair{Mode: p.pairMode}
 	msg, _ := p.ble.ReadMessage()
 	if err := pair.ParseSP1SP2(msg); err != nil {
 		log.Fatalf("pkg pod; error parsing SP1SP2 %s", err)
