@@ -38,12 +38,11 @@ func TestSetUniqueIDMarshalZeroValueIsDash(t *testing.T) {
 	}
 }
 
-// TestSetUniqueIDMarshalO5 pins the Omnipod 5 mode byte stream. Today this
-// equals the Dash bytes because Joe's real O5 capture hasn't landed yet.
-// TODO(joe): once o5SetUniqueIDResponseHex diverges from the Dash constant,
-// update `want` here to the real O5 hex so the regression guard tracks it.
+// TestSetUniqueIDMarshalO5 pins the Omnipod 5 mode byte stream as captured
+// from a real Omnipod 5 pod (Pod Type ID 05, firmware 9.0.4, BLE firmware
+// 5.0.2, Lot 261724721, TID 491153).
 func TestSetUniqueIDMarshalO5(t *testing.T) {
-	const want = "011B13881008340A50040A00010300040308146DB10006E45100001091"
+	const want = "011B13881008340A5009000405000205030F999A3100077E9100000000"
 
 	r := &SetUniqueID{Mode: pair.ModeO5}
 	got, err := r.Marshal()
