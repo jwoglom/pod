@@ -213,8 +213,8 @@ func (b *Ble) RefreshAdvertisingWithSpecifiedId(id []byte) error { // 4 bytes, f
 	// Looking at the paypal/gatt source code, we don't need to call StopAdvertising,
 	// but just call AdvertiseNameAndServices and it should update
 
-	log.Tracef("podIdServiceOne", gatt.UUID16(binary.BigEndian.Uint16(id[0:2])))
-	log.Tracef("podIdServiceTwo", gatt.UUID16(binary.BigEndian.Uint16(id[2:4])))
+	log.Tracef("podIdServiceOne %v", gatt.UUID16(binary.BigEndian.Uint16(id[0:2])))
+	log.Tracef("podIdServiceTwo %v", gatt.UUID16(binary.BigEndian.Uint16(id[2:4])))
 	err := (*b.device).AdvertiseNameAndServices(" :: Fake POD ::", []gatt.UUID{
 		gatt.UUID16(0x4024),
 
@@ -480,7 +480,7 @@ func (b *Ble) readMessage(cmd Packet) (*message.Message, error) {
 	b.WriteCmd(CmdSuccess)
 
 	msg, _err := message.Unmarshal(bytes)
-	log.Tracef("pkg bluetooth; Received message:", spew.Sdump(msg))
+	log.Tracef("pkg bluetooth; Received message: %s", spew.Sdump(msg))
 
 	return msg, _err
 }

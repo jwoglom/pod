@@ -43,11 +43,11 @@ func main() {
 	if !(*freshState) {
 		state, err = pod.NewState(*stateFile)
 		if err != nil {
-			log.Fatalf("pkg pod; could not restore pod state from %s: %+v", stateFile, err)
+			log.Fatalf("pkg pod; could not restore pod state from %s: %+v", *stateFile, err)
 		}
 	}
 
-	log.Tracef("podId %@ %x", state.Id, state.Id)
+	log.Tracef("podId %x", state.Id)
 
 	ble, err := bluetooth.New("hci0", state.Id)
 	//defer ble.Close()
