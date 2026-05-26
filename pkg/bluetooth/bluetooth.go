@@ -305,16 +305,26 @@ func New(adapterID string, podId []byte, mode pair.Mode) (*Ble, error) {
 					log.Tracef("received CMD,  %x", data)
 					ret := make([]byte, len(data))
 					copy(ret, data)
-					// Multi-byte writes (e.g. HELLO = 06 01 04 + 4-byte
-					// controller ID) and any non-RTS/SUCCESS single-byte
-					// signal (HELLO, PAIR_STATUS, INCORRECT, …) belong on
-					// the activation queue. RTS / SUCCESS / NACK / FAIL
-					// stay on cmdInput where the message loop drains them
-					// for fragmentation handshake and ack handling.
-					if len(ret) > 1 || (ret[0] != CmdRTS[0] && ret[0] != CmdSuccess[0] &&
-						ret[0] != CmdNACK[0] && ret[0] != CmdFail[0]) {
-						b.cmdActivation <- Packet(ret)
+					if b.IsO5() {
+						// O5: Multi-byte writes (e.g. HELLO = 06 01 04 +
+						// 4-byte controller ID) and any non-RTS/SUCCESS
+						// single-byte signal (HELLO, PAIR_STATUS,
+						// INCORRECT, …) belong on the activation queue.
+						// RTS / SUCCESS / NACK / FAIL stay on cmdInput
+						// where the message loop drains them for
+						// fragmentation handshake and ack handling.
+						if len(ret) > 1 || (ret[0] != CmdRTS[0] && ret[0] != CmdSuccess[0] &&
+							ret[0] != CmdNACK[0] && ret[0] != CmdFail[0]) {
+							b.cmdActivation <- Packet(ret)
+						} else {
+							b.cmdInput <- Packet(ret)
+						}
 					} else {
+						// Dash: origin/main routes every CMD write to
+						// cmdInput unconditionally. The message loop's
+						// readMessage path consumes RTS bytes there, and
+						// StartAcceptingCommands' ReadCmd() also reads
+						// from cmdInput on Dash.
 						b.cmdInput <- Packet(ret)
 					}
 					return 0
@@ -457,12 +467,18 @@ func (b *Ble) writeDataBuffer(buf *bytes.Buffer) error {
 }
 
 // ReadCmd blocks until the next pairing-state command byte arrives on the
-// CMD characteristic — typically the OmnipodKit HELLO frame
-// (06 01 04 + 4-byte controller ID). RTS/CTS/SUCCESS/NACK/FAIL signal bytes
-// are not delivered here; they are consumed inline by the message loop's
-// readMessage path.
+// CMD characteristic. On Dash this is origin/main's behavior: every CMD
+// write is funnelled through cmdInput, including the single-byte RTS that
+// StartAcceptingCommands waits for. On O5 the dispatcher splits multi-byte
+// activation frames (HELLO = 06 01 04 + 4-byte controller ID, PAIR_STATUS,
+// INCORRECT, …) onto cmdActivation while RTS/CTS/SUCCESS/NACK/FAIL stay on
+// cmdInput for the message loop's fragmentation handshake.
 func (b *Ble) ReadCmd() (Packet, error) {
-	packet := <-b.cmdActivation
+	if b.IsO5() {
+		packet := <-b.cmdActivation
+		return packet, nil
+	}
+	packet := <-b.cmdInput
 	return packet, nil
 }
 
