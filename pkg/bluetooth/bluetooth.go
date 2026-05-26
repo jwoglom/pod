@@ -81,6 +81,17 @@ var DefaultServerOptions = []gatt.Option{
 	}),
 }
 
+// advertiser is the narrow subset of gatt.Device the advertise/refresh
+// helpers need. Pulling these two calls behind an interface lets the
+// regression tests in profile_test.go capture the exact name/UUID/mfg-data
+// arguments each mode produces without having to stand up a real gatt.Device.
+// gatt.Device satisfies this interface implicitly, so the production call
+// sites pass the device unchanged.
+type advertiser interface {
+	AdvertiseNameAndServices(name string, ss []gatt.UUID) error
+	AdvertiseNameServicesMfgData(name string, ss []gatt.UUID, mfg []byte) error
+}
+
 // dashAdvertiseName is the device name the Dash simulator advertises. It is
 // the literal string origin/main has shipped with since the project's first
 // commit; OmnipodKit's Dash scanner does not rely on the name (it matches by
@@ -99,7 +110,7 @@ var o5MfgData = []byte{0x60, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00}
 // identical to main so existing Dash users (and the test fixtures captured
 // against main) keep working. podId is the 4-byte pod address; when nil the
 // default {ff,ff,ff,fe} mapping from main is used.
-func (b *Ble) advertiseDash(d gatt.Device, podId []byte) error {
+func (b *Ble) advertiseDash(d advertiser, podId []byte) error {
 	podIdServiceOne := gatt.UUID16(0xffff)
 	podIdServiceTwo := gatt.UUID16(0xfffe)
 	if podId != nil {
@@ -133,7 +144,7 @@ func (b *Ble) advertiseDash(d gatt.Device, podId []byte) error {
 // from OmnipodKit's observed BLE advertisement frames — OmnipodKit's scanner
 // keys off this field, so the vendored paypal/gatt fork now exposes
 // AdvertiseNameServicesMfgData to let us emit it.
-func (b *Ble) advertiseO5(d gatt.Device, podId []byte) error {
+func (b *Ble) advertiseO5(d advertiser, podId []byte) error {
 	podIdArray, err := hex.DecodeString("fffffffe")
 	if err != nil {
 		return fmt.Errorf("could not parse default address: %w", err)
@@ -160,11 +171,12 @@ func (b *Ble) advertiseO5(d gatt.Device, podId []byte) error {
 // refreshDash is the Dash-profile re-advertise path used after SetUniqueID
 // updates the pod address. Verbatim form from origin/main (same UUID list as
 // advertiseDash but constructed inline so the trace logging matches main's
-// shape too).
-func (b *Ble) refreshDash(id []byte) error {
+// shape too). The advertiser parameter is the same gatt.Device the live
+// caller uses in production; tests pass a mock to capture the exact call.
+func (b *Ble) refreshDash(d advertiser, id []byte) error {
 	log.Tracef("podIdServiceOne %v", gatt.UUID16(binary.BigEndian.Uint16(id[0:2])))
 	log.Tracef("podIdServiceTwo %v", gatt.UUID16(binary.BigEndian.Uint16(id[2:4])))
-	return (*b.device).AdvertiseNameAndServices(dashAdvertiseName, []gatt.UUID{
+	return d.AdvertiseNameAndServices(dashAdvertiseName, []gatt.UUID{
 		gatt.UUID16(0x4024),
 
 		gatt.UUID16(0x2470),
@@ -184,8 +196,10 @@ func (b *Ble) refreshDash(id []byte) error {
 // refreshO5 is the Omnipod 5 re-advertise path used after SetUniqueID. Same
 // shape as advertiseO5, including the OmnipodKit-observed manufacturer-data
 // payload so post-pair re-advertise frames still match real-pod BLE captures.
-func (b *Ble) refreshO5(id []byte) error {
-	return (*b.device).AdvertiseNameServicesMfgData(
+// The advertiser parameter is the same gatt.Device the live caller uses in
+// production; tests pass a mock to capture the exact call.
+func (b *Ble) refreshO5(d advertiser, id []byte) error {
+	return d.AdvertiseNameServicesMfgData(
 		"AP "+strings.ToUpper(hex.EncodeToString(id))+" 0A95B6110002761B",
 		[]gatt.UUID{
 			gatt.MustParseUUID("CE1F923D-C539-48EA-7300-0A" + hex.EncodeToString(id) + "00"),
@@ -453,9 +467,9 @@ func (b *Ble) RefreshAdvertisingWithSpecifiedId(id []byte) error { // 4 bytes, f
 	// origin/main byte-for-byte while O5 keeps the OmnipodKit-shaped form.
 	var err error
 	if b.IsO5() {
-		err = b.refreshO5(id)
+		err = b.refreshO5(*b.device, id)
 	} else {
-		err = b.refreshDash(id)
+		err = b.refreshDash(*b.device, id)
 	}
 	if err != nil {
 		log.Infof("pkg bluetooth; could not re-advertise: %s", err)

@@ -18,6 +18,75 @@ func TestIsAIDPayload(t *testing.T) {
 		{"AID GET 3.12", []byte("G3.12"), true},
 		{"too short", []byte{'S'}, false},
 		{"random bytes", []byte{0x01, 0x02, 0x03, 0x04}, false},
+		// Regression cases: real-world Dash SLPE-wrapped command payloads
+		// must NOT be classified as AID — they all begin with the literal
+		// "S0.0=" envelope (feature "0"), and an O5-side AID parse would
+		// silently corrupt the Dash command path otherwise. The body bytes
+		// after the 2-byte length prefix include the command type
+		// (data[6] in command.Unmarshal): 0x03 SET_UNIQUE_ID, 0x07
+		// GET_VERSION, 0x0e GET_STATUS, 0x1a PROGRAM_INSULIN.
+		{
+			name: "Dash SET_UNIQUE_ID (S0.0= prefix)",
+			// "S0.0=" + 2-byte length + 4-byte id + 2-byte lsf + 0x03 type
+			// + body bytes + 2-byte crc + ",G0.0".
+			data: append(
+				append([]byte("S0.0="), 0x00, 0x15),
+				append([]byte{
+					0xff, 0xff, 0xff, 0xfe, // id
+					0x00, 0x13, // lsf (seq=0,len=0x13)
+					0x03, // SET_UNIQUE_ID
+					// SetUniqueID body is large; just stub plausible bytes.
+					0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+					0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+					0x11, // 17 body bytes (length=0x13 = 19 -> body+crc=19)
+					0xab, 0xcd, // crc
+				}, []byte(",G0.0")...)...,
+			),
+			want: false,
+		},
+		{
+			name: "Dash GET_VERSION (S0.0= prefix)",
+			// Empty-body GET_VERSION still has the S0.0= envelope.
+			data: append(
+				append([]byte("S0.0="), 0x00, 0x0a),
+				append([]byte{
+					0xff, 0xff, 0xff, 0xfe, // id
+					0x00, 0x02, // lsf (len=2)
+					0x07,       // GET_VERSION
+					0x00,       // body
+					0xab, 0xcd, // crc
+				}, []byte(",G0.0")...)...,
+			),
+			want: false,
+		},
+		{
+			name: "Dash GET_STATUS (S0.0= prefix)",
+			data: append(
+				append([]byte("S0.0="), 0x00, 0x0a),
+				append([]byte{
+					0xff, 0xff, 0xff, 0xfe, // id
+					0x00, 0x02, // lsf
+					0x0e,       // GET_STATUS
+					0x00,       // body
+					0xab, 0xcd, // crc
+				}, []byte(",G0.0")...)...,
+			),
+			want: false,
+		},
+		{
+			name: "Dash PROGRAM_INSULIN (S0.0= prefix)",
+			data: append(
+				append([]byte("S0.0="), 0x00, 0x10),
+				append([]byte{
+					0xff, 0xff, 0xff, 0xfe, // id
+					0x00, 0x08, // lsf
+					0x1a,                                     // PROGRAM_INSULIN
+					0x13, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, // body
+					0xab, 0xcd, // crc
+				}, []byte(",G0.0")...)...,
+			),
+			want: false,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
