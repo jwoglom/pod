@@ -13,6 +13,7 @@ import (
 
 	"github.com/avereha/pod/pkg/bluetooth/packet"
 	"github.com/avereha/pod/pkg/message"
+	"github.com/avereha/pod/pkg/pair"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/paypal/gatt"
 	"github.com/paypal/gatt/linux/cmd"
@@ -31,6 +32,11 @@ var (
 )
 
 type Ble struct {
+	// mode selects which BLE profile (Dash or Omnipod 5) the simulator
+	// exposes: advertisement bytes, GATT service shape, transport framing,
+	// and command-channel routing all differ between the two.
+	mode pair.Mode
+
 	dataInput chan Packet
 	cmdInput  chan Packet
 	// cmdActivation receives pairing-state command bytes (HELLO 0x06,
@@ -59,6 +65,12 @@ type Ble struct {
 	heartbeatNotifierMtx sync.Mutex
 }
 
+// IsO5 reports whether this BLE instance is exposing the Omnipod 5 profile.
+// Used internally to gate advertisement, GATT shape, transport framing, and
+// command-channel routing decisions. Dash profile is the default and must
+// match origin/main bit-for-bit.
+func (b *Ble) IsO5() bool { return b.mode == pair.ModeO5 }
+
 var DefaultServerOptions = []gatt.Option{
 	gatt.LnxMaxConnections(1),
 	gatt.LnxDeviceID(-1, true),
@@ -69,13 +81,14 @@ var DefaultServerOptions = []gatt.Option{
 	}),
 }
 
-func New(adapterID string, podId []byte) (*Ble, error) {
+func New(adapterID string, podId []byte, mode pair.Mode) (*Ble, error) {
 	d, err := gatt.NewDevice(DefaultServerOptions...)
 	if err != nil {
 		log.Fatalf("pkg bluetooth; failed to open device, err: %s", err)
 	}
 
 	b := &Ble{
+		mode:          mode,
 		dataInput:     make(chan Packet, 5),
 		cmdInput:      make(chan Packet, 5),
 		cmdActivation: make(chan Packet, 5),
@@ -85,6 +98,8 @@ func New(adapterID string, podId []byte) (*Ble, error) {
 		messageOutput: make(chan *message.Message, 2),
 		device:        &d,
 	}
+
+	log.Infof("pkg bluetooth; profile=%s adapter=%s podId=%x", mode, adapterID, podId)
 
 	d.Handle(
 		gatt.CentralConnected(func(c gatt.Central) {

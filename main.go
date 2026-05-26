@@ -55,7 +55,7 @@ func main() {
 
 	log.Tracef("podId %x", state.Id)
 
-	ble, err := bluetooth.New("hci0", state.Id)
+	ble, err := bluetooth.New("hci0", state.Id, pairMode)
 	//defer ble.Close()
 	if err != nil {
 		log.Fatalf("Could not start BLE: %s", err)
