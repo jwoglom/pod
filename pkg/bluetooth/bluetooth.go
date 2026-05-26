@@ -252,7 +252,11 @@ func New(adapterID string, podId []byte, mode pair.Mode) (*Ble, error) {
 
 	// Heartbeat emitter: once a phone subscribes to the heartbeat
 	// characteristic, push a one-byte notification every 10s. Real O5 pods
-	// use this as a connection keep-alive.
+	// use this as a connection keep-alive. The ticker spawns unconditionally
+	// for both modes — in Dash mode the heartbeat service is never
+	// registered (see onStateChanged below) so b.heartbeatNotifier stays
+	// nil and the nil-check below makes the ticker a no-op. No Notify call
+	// is ever fired for Dash.
 	go func() {
 		t := time.NewTicker(10 * time.Second)
 		defer t.Stop()
@@ -274,11 +278,16 @@ func New(adapterID string, podId []byte, mode pair.Mode) (*Ble, error) {
 		fmt.Printf("state: %s\n", s)
 		switch s {
 		case gatt.StatePoweredOn:
-			// Main pod GATT service (Omnipod 5; same primary UUID as Dash).
+			// Main pod GATT service (same primary UUID for Dash and Omnipod 5).
 			// Source: OmnipodKit BluetoothServices.swift / BlePodProfile.swift.
+			// Dash and O5 share the service + cmd char UUIDs; only the data
+			// char UUID differs (Dash uses 2442 verbatim from origin/main, O5
+			// uses 2443 per OmnipodKit). The O5-only heartbeat service is
+			// registered alongside the main service for O5 mode.
 			var serviceUUID = gatt.MustParseUUID("1A7E4024-E3ED-4464-8B7E-751E03D0DC5F")
 			var cmdCharUUID = gatt.MustParseUUID("1A7E2441-E3ED-4464-8B7E-751E03D0DC5F")
-			var dataCharUUID = gatt.MustParseUUID("1A7E2443-E3ED-4464-8B7E-751E03D0DC5F")
+			var dashDataCharUUID = gatt.MustParseUUID("1A7E2442-E3ED-4464-8B7E-751E03D0DC5F")
+			var o5DataCharUUID = gatt.MustParseUUID("1A7E2443-E3ED-4464-8B7E-751E03D0DC5F")
 
 			// Omnipod 5 heartbeat service used for keep-alive.
 			// The pod GATT service UUID is 7DED7A6C... and its single
@@ -319,6 +328,15 @@ func New(adapterID string, podId []byte, mode pair.Mode) (*Ble, error) {
 					log.Infof("pkg bluetooth; handling CMD notifications on new connection from:  %s", r.Central.ID())
 				})
 
+			// Mode-branch the data characteristic UUID: Dash keeps the 2442
+			// value from origin/main, O5 uses 2443 per OmnipodKit. The
+			// notify/write callbacks are identical for both modes — the
+			// transport (Commit D) and command dispatcher (Commit E) will
+			// branch on b.IsO5() where they need to.
+			dataCharUUID := dashDataCharUUID
+			if b.IsO5() {
+				dataCharUUID = o5DataCharUUID
+			}
 			dataCharacteristic := s.AddCharacteristic(dataCharUUID)
 			dataCharacteristic.HandleNotifyFunc(
 				func(r gatt.Request, n gatt.Notifier) {
@@ -338,19 +356,30 @@ func New(adapterID string, podId []byte, mode pair.Mode) (*Ble, error) {
 					return 0
 				})
 
-			h := gatt.NewService(heartbeatServiceUUID)
-			hbCharacteristic := h.AddCharacteristic(heartbeatCharUUID)
-			hbCharacteristic.HandleNotifyFunc(
-				func(r gatt.Request, n gatt.Notifier) {
-					b.heartbeatNotifierMtx.Lock()
-					b.heartbeatNotifier = n
-					b.heartbeatNotifierMtx.Unlock()
-					log.Infof("pkg bluetooth; handling heartbeat notifications on new connection from: %s", r.Central.ID())
-				})
+			// Mode-branch the GATT registration call. Dash uses the singular
+			// AddService form from origin/main and does NOT expose the
+			// heartbeat service. O5 builds the heartbeat service and
+			// registers both via SetServices, matching the OmnipodKit shape.
+			if b.IsO5() {
+				h := gatt.NewService(heartbeatServiceUUID)
+				hbCharacteristic := h.AddCharacteristic(heartbeatCharUUID)
+				hbCharacteristic.HandleNotifyFunc(
+					func(r gatt.Request, n gatt.Notifier) {
+						b.heartbeatNotifierMtx.Lock()
+						b.heartbeatNotifier = n
+						b.heartbeatNotifierMtx.Unlock()
+						log.Infof("pkg bluetooth; handling heartbeat notifications on new connection from: %s", r.Central.ID())
+					})
 
-			err = d.SetServices([]*gatt.Service{s, h})
-			if err != nil {
-				log.Fatalf("pkg bluetooth; could not add service: %s", err)
+				err = d.SetServices([]*gatt.Service{s, h})
+				if err != nil {
+					log.Fatalf("pkg bluetooth; could not add service: %s", err)
+				}
+			} else {
+				err = d.AddService(s)
+				if err != nil {
+					log.Fatalf("pkg bluetooth; could not add service: %s", err)
+				}
 			}
 
 			// Mode-branch the advertisement so DASH stays byte-for-byte
