@@ -154,8 +154,8 @@ func (b *Ble) advertiseO5(d gatt.Device, podId []byte) error {
 // advertiseDash but constructed inline so the trace logging matches main's
 // shape too).
 func (b *Ble) refreshDash(id []byte) error {
-	log.Tracef("podIdServiceOne", gatt.UUID16(binary.BigEndian.Uint16(id[0:2])))
-	log.Tracef("podIdServiceTwo", gatt.UUID16(binary.BigEndian.Uint16(id[2:4])))
+	log.Tracef("podIdServiceOne %v", gatt.UUID16(binary.BigEndian.Uint16(id[0:2])))
+	log.Tracef("podIdServiceTwo %v", gatt.UUID16(binary.BigEndian.Uint16(id[2:4])))
 	return (*b.device).AdvertiseNameAndServices(dashAdvertiseName, []gatt.UUID{
 		gatt.UUID16(0x4024),
 
@@ -505,7 +505,55 @@ func (b *Ble) WriteMessage(message *message.Message) {
 	b.messageOutput <- message
 }
 
+// loop dispatches to a mode-specific transport reader/writer.
+//
+// Dash and Omnipod 5 use fundamentally different fragmentation framings on
+// the wire, so the message loop has to be branched at the top: Dash uses the
+// legacy hand-rolled 20-byte RTS/CTS/SUCCESS handshake from origin/main,
+// while O5 uses the packet.Split/Join framing aligned with OmnipodKit.
+// Branching once here keeps each transport's select self-contained and
+// avoids a hot-path b.IsO5() check per case.
 func (b *Ble) loop(stop chan bool) {
+	if b.IsO5() {
+		b.loopO5(stop)
+	} else {
+		b.loopDash(stop)
+	}
+}
+
+// loopDash is the legacy origin/main message loop: outgoing messages go
+// through writeMessage (20-byte RTS/CTS fragments) and incoming messages are
+// reassembled by readMessage (which consumes data fragments from b.dataInput
+// inline via b.ReadData() during the RTS handshake). There is intentionally
+// NO `case data := <-b.dataInput` here — on Dash, the data characteristic's
+// fragments are pulled by readMessage, not by the loop's select.
+func (b *Ble) loopDash(stop chan bool) {
+	for {
+		select {
+		case <-stop:
+			return
+		case msg := <-b.messageOutput:
+			b.writeMessage(msg)
+		case cmd := <-b.cmdInput:
+			msg, err := b.readMessage(cmd)
+			if err != nil {
+				log.Fatalf("pkg bluetooth; error reading message: %s", err)
+			}
+			if msg != nil {
+				b.messageInput <- msg
+			}
+		}
+	}
+}
+
+// loopO5 is the Omnipod 5 message loop: outgoing messages go through
+// writeMessageData (packet.Split, up to 244-byte fragments) and incoming
+// data fragments arrive on b.dataInput where readMessageData / packet.Join
+// reassembles them. The cmdInput case is kept as a fallback for any RTS-like
+// signal byte that slips through; readMessage warns and returns nil for
+// non-RTS bytes (added in Commit 9), so this never fatals on stray cmd
+// bytes — and on O5 the phone is not expected to send RTS at all.
+func (b *Ble) loopO5(stop chan bool) {
 	for {
 		select {
 		case <-stop:
