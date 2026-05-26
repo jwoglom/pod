@@ -59,11 +59,23 @@ func New(ble *bluetooth.Ble, stateFile string, freshState bool, pairMode pair.Mo
 
 	// Mirror the active pair mode onto persisted state so response-layer
 	// code (which doesn't see the Pod struct) can pick the right Dash/O5
-	// byte stream. Always overwrite: the -mode flag is the source of
-	// truth for the current run.
-	state.Mode = pairMode
-	if err := state.Save(); err != nil {
-		log.Warnf("pkg pod; could not persist pair mode to state: %s", err)
+	// byte stream. On a fresh start the CLI flag is authoritative and we
+	// persist it. On a restart we leave state.Mode alone: the caller is
+	// expected to have already reconciled the CLI flag against state.Mode
+	// via ResolveMode and to pass the resolved value in here, so silently
+	// overwriting would corrupt the persisted mode whenever the operator
+	// forgot the -mode flag. See pkg/pod/state.go ResolveMode.
+	if freshState {
+		state.Mode = pairMode
+		if err := state.Save(); err != nil {
+			log.Warnf("pkg pod; could not persist pair mode to state: %s", err)
+		}
+	} else if state.Mode != pairMode {
+		// Defensive: caller forgot to reconcile. Trust the resolved
+		// pairMode argument for in-memory routing without rewriting
+		// the persisted value, and log loudly so the bug is visible.
+		log.Warnf("pkg pod; persisted mode %q != resolved mode %q passed to pod.New; in-memory routing will use the argument but state.toml will NOT be overwritten",
+			state.Mode, pairMode)
 	}
 
 	ret := &Pod{

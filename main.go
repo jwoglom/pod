@@ -55,6 +55,17 @@ func main() {
 
 	log.Tracef("podId %x", state.Id)
 
+	// Reconcile the CLI -mode flag against any persisted mode so a
+	// restart without -mode doesn't silently rewrite an O5 state to
+	// Dash (the flag's default). On a fresh start the flag wins; on a
+	// restart the persisted value wins and we warn on mismatch.
+	resolvedMode, modeConflict := pod.ResolveMode(state, pairMode, *freshState)
+	if modeConflict {
+		log.Warnf("persisted mode %q differs from -mode flag %q; using persisted value (pass -fresh to override)",
+			state.Mode, pairMode)
+	}
+	pairMode = resolvedMode
+
 	ble, err := bluetooth.New("hci0", state.Id, pairMode)
 	//defer ble.Close()
 	if err != nil {

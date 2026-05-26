@@ -89,6 +89,30 @@ func (p *PODState) Save() error {
 	return ioutil.WriteFile(p.Filename, data, 0777)
 }
 
+// ResolveMode picks the effective pairing mode for this process, honouring
+// persisted state across restarts so the operator doesn't silently rewrite
+// an O5 state.toml to Dash by forgetting the -mode flag.
+//
+// Precedence:
+//
+//   - freshState=true: the CLI flag wins; caller is expected to persist it.
+//   - freshState=false: state.Mode wins. If it differs from the CLI flag,
+//     conflict=true is reported so the caller can warn the operator. The
+//     resolved value is still the persisted one (use -fresh to override).
+//
+// Because pair.ModeDash is the zero value, a legacy state file written
+// before the mode field existed deserializes as ModeDash, which lines up
+// with the default CLI flag and produces no conflict.
+func ResolveMode(state *PODState, flagMode pair.Mode, freshState bool) (resolved pair.Mode, conflict bool) {
+	if freshState || state == nil {
+		return flagMode, false
+	}
+	if state.Mode != flagMode {
+		return state.Mode, true
+	}
+	return state.Mode, false
+}
+
 func (p *PODState) MinutesActive() uint16 {
 	return uint16(time.Now().Sub(p.ActivationTime).Round(time.Minute).Minutes())
 }
