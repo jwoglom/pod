@@ -81,6 +81,110 @@ var DefaultServerOptions = []gatt.Option{
 	}),
 }
 
+// dashAdvertiseName is the device name the Dash simulator advertises. It is
+// the literal string origin/main has shipped with since the project's first
+// commit; OmnipodKit's Dash scanner does not rely on the name (it matches by
+// the 0x4024 service UUID), but the byte-for-byte form is preserved so
+// btmon captures continue to compare cleanly with main.
+const dashAdvertiseName = " :: Fake POD ::"
+
+// advertiseDash advertises the Dash profile: the " :: Fake POD ::" name and
+// the 9-element UUID16 list from origin/main. This must remain byte-for-byte
+// identical to main so existing Dash users (and the test fixtures captured
+// against main) keep working. podId is the 4-byte pod address; when nil the
+// default {ff,ff,ff,fe} mapping from main is used.
+func (b *Ble) advertiseDash(d gatt.Device, podId []byte) error {
+	podIdServiceOne := gatt.UUID16(0xffff)
+	podIdServiceTwo := gatt.UUID16(0xfffe)
+	if podId != nil {
+		podIdServiceOne = gatt.UUID16(binary.BigEndian.Uint16(podId[0:2]))
+		podIdServiceTwo = gatt.UUID16(binary.BigEndian.Uint16(podId[2:4]))
+	}
+
+	// Advertise device name and service's UUIDs.
+	return d.AdvertiseNameAndServices(dashAdvertiseName, []gatt.UUID{
+		gatt.UUID16(0x4024),
+
+		gatt.UUID16(0x2470),
+		gatt.UUID16(0x000a),
+
+		podIdServiceOne,
+		podIdServiceTwo,
+
+		// these 4 are copied from lotNo and lotSeq from fixed string in versionresponse.go
+		gatt.UUID16(0x0814),
+		gatt.UUID16(0x6DB1),
+		gatt.UUID16(0x0006),
+		gatt.UUID16(0xE451),
+	})
+}
+
+// advertiseO5 advertises the Omnipod 5 profile: an "AP <hex> 0A95B6110002761B"
+// name and two 128-bit UUIDs (CE1F923D-...0A<podId>00 plus the ECF301E2...
+// scanner identifier). When podId is nil the default {ff,ff,ff,fe} mapping
+// is used. NOTE: the manufacturer-data field (60030001000000) that the real
+// pod co-advertises is NOT emitted here — the vendored paypal/gatt in this
+// tree does not expose AdvertiseNameServicesMfgData. Commit F is expected
+// to add that helper.
+func (b *Ble) advertiseO5(d gatt.Device, podId []byte) error {
+	podIdArray, err := hex.DecodeString("fffffffe")
+	if err != nil {
+		return fmt.Errorf("could not parse default address: %w", err)
+	}
+	if podId != nil {
+		podIdArray = podId
+	}
+
+	// CE1F923D-C539-48EA-7300-0AFFFFFFFE00 unpaired, or
+	// CE1F923D-C539-48EA-7300-0A<pdmId>00 once paired. The
+	// ECF301E2... UUID is OmnipodKit's "advertisement" identifier
+	// for the O5 heartbeat service and is co-advertised so the
+	// scanner can find it during discovery (BluetoothServices.swift).
+	return d.AdvertiseNameAndServices(
+		"AP "+strings.ToUpper(hex.EncodeToString(podIdArray))+" 0A95B6110002761B",
+		[]gatt.UUID{
+			gatt.MustParseUUID("CE1F923D-C539-48EA-7300-0A" + hex.EncodeToString(podIdArray) + "00"),
+			gatt.MustParseUUID("ECF301E2-674B-4474-94D0-364F3AA653E6"),
+		},
+	)
+}
+
+// refreshDash is the Dash-profile re-advertise path used after SetUniqueID
+// updates the pod address. Verbatim form from origin/main (same UUID list as
+// advertiseDash but constructed inline so the trace logging matches main's
+// shape too).
+func (b *Ble) refreshDash(id []byte) error {
+	log.Tracef("podIdServiceOne", gatt.UUID16(binary.BigEndian.Uint16(id[0:2])))
+	log.Tracef("podIdServiceTwo", gatt.UUID16(binary.BigEndian.Uint16(id[2:4])))
+	return (*b.device).AdvertiseNameAndServices(dashAdvertiseName, []gatt.UUID{
+		gatt.UUID16(0x4024),
+
+		gatt.UUID16(0x2470),
+		gatt.UUID16(0x000a),
+
+		gatt.UUID16(binary.BigEndian.Uint16(id[0:2])),
+		gatt.UUID16(binary.BigEndian.Uint16(id[2:4])),
+
+		// these 4 are copied from lotNo and lotSeq from fixed string in versionresponse.go
+		gatt.UUID16(0x0814),
+		gatt.UUID16(0x6DB1),
+		gatt.UUID16(0x0006),
+		gatt.UUID16(0xE451),
+	})
+}
+
+// refreshO5 is the Omnipod 5 re-advertise path used after SetUniqueID. Same
+// shape as advertiseO5; manufacturer-data is still deferred to Commit F.
+func (b *Ble) refreshO5(id []byte) error {
+	return (*b.device).AdvertiseNameAndServices(
+		"AP "+strings.ToUpper(hex.EncodeToString(id))+" 0A95B6110002761B",
+		[]gatt.UUID{
+			gatt.MustParseUUID("CE1F923D-C539-48EA-7300-0A" + hex.EncodeToString(id) + "00"),
+			gatt.MustParseUUID("ECF301E2-674B-4474-94D0-364F3AA653E6"),
+		},
+	)
+}
+
 func New(adapterID string, podId []byte, mode pair.Mode) (*Ble, error) {
 	d, err := gatt.NewDevice(DefaultServerOptions...)
 	if err != nil {
@@ -249,35 +353,34 @@ func New(adapterID string, podId []byte, mode pair.Mode) (*Ble, error) {
 				log.Fatalf("pkg bluetooth; could not add service: %s", err)
 			}
 
-			podIdArray, err := hex.DecodeString("fffffffe")
-			if err != nil {
-				log.Fatalf("pkg bluetooth; could not parse default address: %s", err)
+			// Mode-branch the advertisement so DASH stays byte-for-byte
+			// identical to origin/main (which is what existing Dash scanners
+			// match against) while O5 keeps the OmnipodKit-shaped name and
+			// 128-bit UUID list. The manufacturer-data payload that real O5
+			// pods co-advertise is still missing and will be added in Commit
+			// F when the vendored paypal/gatt gains a helper for it.
+			var advertiseErr error
+			var advertisedName string
+			var advertisedUUIDCount int
+			if b.IsO5() {
+				advertiseErr = b.advertiseO5(d, podId)
+				// Mirror the name/uuid-count computation from advertiseO5 so
+				// the startup log matches what was actually advertised.
+				idHex := "FFFFFFFE"
+				if podId != nil {
+					idHex = strings.ToUpper(hex.EncodeToString(podId))
+				}
+				advertisedName = "AP " + idHex + " 0A95B6110002761B"
+				advertisedUUIDCount = 2
+			} else {
+				advertiseErr = b.advertiseDash(d, podId)
+				advertisedName = dashAdvertiseName
+				advertisedUUIDCount = 9
 			}
-
-			if podId != nil {
-				podIdArray = podId
+			if advertiseErr != nil {
+				log.Fatalf("pkg bluetooth; advertise: %s", advertiseErr)
 			}
-
-			// CE1F923D-C539-48EA-7300-0AFFFFFFFE00 unpaired, or
-			// CE1F923D-C539-48EA-7300-0A<pdmId>00 once paired. The
-			// ECF301E2... UUID is OmnipodKit's "advertisement" identifier
-			// for the O5 heartbeat service and is co-advertised so the
-			// scanner can find it during discovery (BluetoothServices.swift).
-			//
-			// NOTE: the vendored paypal/gatt in this tree does not expose
-			// AdvertiseNameServicesMfgData; the manufacturer-data payload
-			// (60030001000000) cannot be advertised without patching the
-			// vendor library. Fall back to AdvertiseNameAndServices for now.
-			err = d.AdvertiseNameAndServices(
-				"AP "+strings.ToUpper(hex.EncodeToString(podIdArray))+" 0A95B6110002761B",
-				[]gatt.UUID{
-					gatt.MustParseUUID("CE1F923D-C539-48EA-7300-0A" + hex.EncodeToString(podIdArray) + "00"),
-					gatt.MustParseUUID("ECF301E2-674B-4474-94D0-364F3AA653E6"),
-				},
-			)
-			if err != nil {
-				log.Fatalf("pkg bluetooth; could not advertise: %s", err)
-			}
+			log.Infof("pkg bluetooth; advertising name=%q uuid_count=%d", advertisedName, advertisedUUIDCount)
 		default:
 		}
 	}
@@ -290,19 +393,16 @@ func New(adapterID string, podId []byte, mode pair.Mode) (*Ble, error) {
 
 func (b *Ble) RefreshAdvertisingWithSpecifiedId(id []byte) error { // 4 bytes, first 2 usually empty
 	log.Debugf("RefreshAdvertisingWithSpecifiedId %x", id)
-	// Looking at the paypal/gatt source code, we don't need to call StopAdvertising,
-	// but just call AdvertiseNameAndServices and it should update.
-	//
-	// As with the initial advertise in New(), the vendored gatt does not
-	// support manufacturer-data advertising, so the 60030001000000 payload
-	// is omitted here as well.
-	err := (*b.device).AdvertiseNameAndServices(
-		"AP "+strings.ToUpper(hex.EncodeToString(id))+" 0A95B6110002761B",
-		[]gatt.UUID{
-			gatt.MustParseUUID("CE1F923D-C539-48EA-7300-0A" + hex.EncodeToString(id) + "00"),
-			gatt.MustParseUUID("ECF301E2-674B-4474-94D0-364F3AA653E6"),
-		},
-	)
+	// Looking at the paypal/gatt source code, we don't need to call
+	// StopAdvertising, but just call AdvertiseNameAndServices and it should
+	// update. Mode-branch the actual payload so DASH refreshes match
+	// origin/main byte-for-byte while O5 keeps the OmnipodKit-shaped form.
+	var err error
+	if b.IsO5() {
+		err = b.refreshO5(id)
+	} else {
+		err = b.refreshDash(id)
+	}
 	if err != nil {
 		log.Infof("pkg bluetooth; could not re-advertise: %s", err)
 	}
