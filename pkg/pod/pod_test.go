@@ -14,9 +14,10 @@ import (
 // radio carries one side's notifications to the other side, and records
 // when the pod hangs up.
 type radio struct {
-	mu     sync.Mutex
-	peer   *bluetooth.Ble
-	hungUp chan bool
+	mu         sync.Mutex
+	peer       *bluetooth.Ble
+	hungUp     chan bool
+	advertised chan []byte // the ids the pod advertises
 }
 
 func (r *radio) to() *bluetooth.Ble {
@@ -39,7 +40,13 @@ func (r *radio) NotifyData(p bluetooth.Packet) error {
 	return nil
 }
 
-func (r *radio) Advertise([]byte) error                     { return nil }
+func (r *radio) Advertise(id []byte) error {
+	select {
+	case r.advertised <- id:
+	default:
+	}
+	return nil
+}
 func (r *radio) AdvertiseState(bluetooth.AdvertState) error { return nil }
 
 func (r *radio) Disconnect() {
