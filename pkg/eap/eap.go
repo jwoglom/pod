@@ -2,6 +2,7 @@ package eap
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 
@@ -184,12 +185,19 @@ func NewEapAkaChallenge(k []byte, sqn uint64) *EapAkaChallenge {
 	op, _ := hex.DecodeString("cdc202d5123e20f62b6d676ac72cb318")
 	// amf, _ := hex.DecodeString("b9b9")
 	log.Debugf("Starting EAP-AKA session with SQN(after incrementing SQN): %d", sqn+1)
+	// The pod's half of the session nonce prefix; a real pod draws a new
+	// one for every session.
+	podIV := make([]byte, 4)
+	if _, err := rand.Read(podIV); err != nil {
+		log.Warnf("pkg eap; no random pod IV (%s); using a fixed one", err)
+		podIV = []byte{0xa, 0xa, 0xa, 0xa}
+	}
 	return &EapAkaChallenge{
 		k:     k,
 		op:    op,
 		Sqn:   sqn + 1,
-		amf:   47545,                      // b9b9
-		podIV: []byte{0xa, 0xa, 0xa, 0xa}, // constant for now, easier to debug. TODO
+		amf:   47545, // b9b9
+		podIV: podIV,
 	}
 }
 
@@ -231,12 +239,27 @@ func (e *EapAkaChallenge) GenerateChallengeResponse() (*message.Message, error) 
 		e.amf,
 	)
 
-	// TODO check AUTN
-
-	// TODO check if IK/AK is used for anything
-	e.res, e.ck, _, _, err = mil.F2345()
+	var ak []byte
+	e.res, e.ck, _, ak, err = mil.F2345()
 	if err != nil {
 		return nil, err
+	}
+	// AUTN is SQN^AK (6) || AMF (2) || MAC-A (8). The MAC-A over the phone's
+	// SQN proves it holds the LTK; a mismatch is reported but, as the
+	// session key depends only on K and RAND, the session goes on.
+	if len(e.autn) == 16 {
+		phoneSqn := make([]byte, 6)
+		for i := range phoneSqn {
+			phoneSqn[i] = e.autn[i] ^ ak[i]
+		}
+		if _, err := mil.F1(); err == nil {
+			if bytes.Equal(e.autn[8:], mil.MACA) {
+				log.Debugf("EapAka AUTN verifies; phone SQN %x", phoneSqn)
+			} else {
+				log.Warnf("EapAka AUTN MAC-A %x does not verify (expected %x for our SQN %d; phone SQN %x)",
+					e.autn[8:], mil.MACA, e.Sqn, phoneSqn)
+			}
+		}
 	}
 
 	eap := &EapAka{Code: CodeResponse,
