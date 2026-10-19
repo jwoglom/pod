@@ -8,6 +8,7 @@ import (
 
 	"github.com/avereha/pod/pkg/bluetooth"
 	"github.com/avereha/pod/pkg/message"
+	"github.com/avereha/pod/pkg/mode"
 )
 
 // radio carries one side's notifications to the other side, and records
@@ -49,7 +50,7 @@ func (r *radio) Disconnect() {
 }
 
 func newBle(t *testing.T, r *radio) *bluetooth.Ble {
-	b, err := bluetooth.New(func(*bluetooth.Ble) (bluetooth.Radio, error) { return r, nil })
+	b, err := bluetooth.New(mode.Dash, func(*bluetooth.Ble) (bluetooth.Radio, error) { return r, nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +64,7 @@ func TestAGarbledSessionMessageHangsUp(t *testing.T) {
 	toPod.peer = podBle
 	toPhone.peer = phone
 
-	state := NewFreshState(filepath.Join(t.TempDir(), "state.toml"))
+	state := NewFreshState(filepath.Join(t.TempDir(), "state.toml"), mode.Dash)
 	state.LTK = make([]byte, 16)
 	p := New(podBle, state)
 
