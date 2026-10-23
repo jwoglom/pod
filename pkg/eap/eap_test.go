@@ -1,9 +1,12 @@
 package eap
 
 import (
+	"bytes"
+	"encoding/hex"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/wmnsk/milenage"
 )
 
 func TestEapAka_MarshalUnmarshal(t *testing.T) {
@@ -72,5 +75,39 @@ func TestEapAka_MarshalUnmarshal(t *testing.T) {
 				t.Errorf("EapAka.Unmarshal() mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+// The AUTN OmnipodKit sent when pairing with the simulator, whose SQN (1)
+// is one behind the pod's own (2): the MAC-A is checked over the phone's.
+func TestEapAkaChallenge_PhoneMACA(t *testing.T) {
+	unhex := func(s string) []byte {
+		b, err := hex.DecodeString(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	e := &EapAkaChallenge{
+		k:    unhex("6c04db96dba94827bfb5e23d821552f2"),
+		op:   unhex("cdc202d5123e20f62b6d676ac72cb318"),
+		rand: unhex("d4e5514ae04b0016b4fdeeab719b800f"),
+		autn: unhex("81590495535eb9b9e21e56a91fa03fcf"),
+		amf:  0xb9b9,
+		Sqn:  2,
+	}
+	_, _, _, ak, err := milenage.New(e.k, e.op, e.rand, e.Sqn, e.amf).F2345()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqn, maca, err := e.phoneMACA(ak)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sqn != 1 {
+		t.Errorf("phone SQN = %d, want 1", sqn)
+	}
+	if !bytes.Equal(maca, e.autn[8:]) {
+		t.Errorf("MAC-A = %x, want the AUTN's %x", maca, e.autn[8:])
 	}
 }

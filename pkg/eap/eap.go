@@ -228,6 +228,18 @@ func (e *EapAkaChallenge) CKNoncePrefix() ([]byte, []byte) {
 	return e.ck, nonce
 }
 
+// phoneMACA returns the SQN the phone sent and the MAC-A it should have
+// sent with it. AUTN is SQN^AK (6) || AMF (2) || MAC-A (8); the phone keeps
+// its own SQN, which need not be the pod's.
+func (e *EapAkaChallenge) phoneMACA(ak []byte) (uint64, []byte, error) {
+	var sqn uint64
+	for i := 0; i < 6; i++ {
+		sqn = sqn<<8 | uint64(e.autn[i]^ak[i])
+	}
+	maca, err := milenage.New(e.k, e.op, e.rand, sqn, e.amf).F1()
+	return sqn, maca, err
+}
+
 func (e *EapAkaChallenge) GenerateChallengeResponse() (*message.Message, error) {
 	var err error
 	ret := message.NewMessage(message.MessageTypeSessionEstablishment, e.podID, e.pdmID)
@@ -244,20 +256,16 @@ func (e *EapAkaChallenge) GenerateChallengeResponse() (*message.Message, error) 
 	if err != nil {
 		return nil, err
 	}
-	// AUTN is SQN^AK (6) || AMF (2) || MAC-A (8). The MAC-A over the phone's
-	// SQN proves it holds the LTK; a mismatch is reported but, as the
-	// session key depends only on K and RAND, the session goes on.
+	// The MAC-A over the phone's SQN proves it holds the LTK; a mismatch is
+	// reported but, as the session key depends only on K and RAND, the
+	// session goes on.
 	if len(e.autn) == 16 {
-		phoneSqn := make([]byte, 6)
-		for i := range phoneSqn {
-			phoneSqn[i] = e.autn[i] ^ ak[i]
-		}
-		if _, err := mil.F1(); err == nil {
-			if bytes.Equal(e.autn[8:], mil.MACA) {
-				log.Debugf("EapAka AUTN verifies; phone SQN %x", phoneSqn)
+		if phoneSqn, maca, err := e.phoneMACA(ak); err == nil {
+			if bytes.Equal(e.autn[8:], maca) {
+				log.Debugf("EapAka AUTN verifies; phone SQN %d", phoneSqn)
 			} else {
-				log.Warnf("EapAka AUTN MAC-A %x does not verify (expected %x for our SQN %d; phone SQN %x)",
-					e.autn[8:], mil.MACA, e.Sqn, phoneSqn)
+				log.Warnf("EapAka AUTN MAC-A %x does not verify (expected %x for the phone's SQN %d)",
+					e.autn[8:], maca, phoneSqn)
 			}
 		}
 	}
